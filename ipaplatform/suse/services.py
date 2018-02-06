@@ -48,14 +48,14 @@ suse_system_units['ods_signerd'] = suse_system_units['ods-signerd']
 class SuseService(base_services.SystemdService):
     system_units = suse_system_units
 
-    def __init__(self, service_name):
+    def __init__(self, service_name, api=None):
         systemd_name = service_name
         if service_name in self.system_units:
             systemd_name = self.system_units[service_name]
         else:
             if '.' not in service_name:
                 systemd_name = "%s.service" % (service_name)
-        super().__init__(service_name, systemd_name)
+        super().__init__(service_name, systemd_name, api)
 
 
 class SuseDirectoryService(SuseService):
@@ -185,8 +185,8 @@ class SuseODSEnforcerdService(SuseService):
 
 # There is not a certmonger on SUSE, therefore everything is noop.
 class SuseCertmongerService(base_services.PlatformService):
-    def __init__(self):
-        base_services.PlatformService.__init__(self, 'there-is-no-certmonger')
+    def __init__(self, api=None):
+        base_services.PlatformService.__init__(self, 'there-is-no-certmonger', api)
 
     def start(instance_name="", capture_output=True, wait=True, update_service_list=True):
         pass
@@ -195,34 +195,35 @@ class SuseCertmongerService(base_services.PlatformService):
         pass
 
 
-def suse_service_class_factory(name):
+def suse_service_class_factory(name, api=None):
     if name == 'dirsrv':
-        return SuseDirectoryService(name)
+        return SuseDirectoryService(name, api)
     if name == 'ipa':
-        return SuseIPAService(name)
+        return SuseIPAService(name, api)
     if name == 'sshd':
-        return SuseSSHService(name)
+        return SuseSSHService(name, api)
     if name in ('pki-cad', 'pki_cad', 'pki-tomcatd', 'pki_tomcatd'):
-        return SuseCAService(name)
+        return SuseCAService(name, api)
     if name == 'named':
-        return SuseNamedService(name)
+        return SuseNamedService(name, api)
     if name in ('ods-enforcerd', 'ods_enforcerd'):
-        return SuseODSEnforcerdService(name)
+        return SuseODSEnforcerdService(name, api)
     if name == 'certmonger':
-        return SuseCertmongerService()
-    return SuseService(name)
+        return SuseCertmongerService(api)
+    return SuseService(name, api)
 
 
 class SuseServices(base_services.KnownServices):
-    def service_class_factory(self, name):
-        return suse_service_class_factory(name)
+    def service_class_factory(self, name, api):
+        return suse_service_class_factory(name, api)
 
     # Credits to upstream developer
     def __init__(self):
+        import ipalib
         services = dict()
         for s in base_services.wellknownservices:
-            services[s] = self.service_class_factory(s)
-        super().__init__(services)
+            services[s] = self.service_class_factory(s, ipalib.api)
+        super().__init__(services, api)
 
 
 timedate_services = ['ntpd']
