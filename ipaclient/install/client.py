@@ -642,27 +642,27 @@ def configure_krb5_conf(
         krbconf.emptyLine(),
     ]
 
-    if os.path.exists(paths.COMMON_KRB5_CONF_DIR):
-        opts.extend([
-            {
-                'name': 'includedir',
-                'type': 'option',
-                'value': paths.COMMON_KRB5_CONF_DIR,
-                'delim': ' '
-            }
-        ])
-
-    # SSSD include dir
-    if configure_sssd:
-        opts.extend([
-            {
-                'name': 'includedir',
-                'type': 'option',
-                'value': paths.SSSD_PUBCONF_KRB5_INCLUDE_D_DIR,
-                'delim': ' '
-            },
-            krbconf.emptyLine()])
-
+#   if os.path.exists(paths.COMMON_KRB5_CONF_DIR):
+#       opts.extend([
+#           {
+#               'name': 'includedir',
+#               'type': 'option',
+#               'value': paths.COMMON_KRB5_CONF_DIR,
+#               'delim': ' '
+#           }
+#       ])
+#
+#   # SSSD include dir
+#   if configure_sssd:
+#       opts.extend([
+#           {
+#               'name': 'includedir',
+#               'type': 'option',
+#               'value': paths.SSSD_PUBCONF_KRB5_INCLUDE_D_DIR,
+#               'delim': ' '
+#           },
+#           krbconf.emptyLine()])
+#
     # [libdefaults]
     libopts = [
         krbconf.setOption('default_realm', cli_realm)
