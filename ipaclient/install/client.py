@@ -2576,7 +2576,7 @@ def _install(options):
                 subject_base = DN(subject_base)
 
             if options.principal is not None:
-                run(["kdestroy"], raiseonerr=False, env=env)
+                run([paths.KDESTROY], raiseonerr=False, env=env)
 
             # Obtain the TGT. We do it with the temporary krb5.conf, so that
             # only the KDC we're installing under is contacted.
