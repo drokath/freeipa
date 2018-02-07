@@ -34,7 +34,7 @@ class SusePathNamespace(BasePathNamespace):
     NAMED_MANAGED_KEYS_DIR = "/var/lib/named/dyn"
     SYSCONFIG_HTTPD = "/etc/sysconfig/apache2"
     SYSCONFIG_NTPD = "/etc/sysconfig/ntp"
-    UPDATE_CA_TRUST = "/usr/bin/update-ca-certificates"
+    UPDATE_CA_TRUST = "/usr/sbin/update-ca-certificates"
     IPA_SERVER_GUARD = "/usr/lib/certmonger/ipa-server-guard"
     IPA_DNSKEYSYNCD_REPLICA = "/usr/lib/ipa/ipa-dnskeysync-replica"
     IPA_DNSKEYSYNCD = "/usr/lib/ipa/ipa-dnskeysyncd"
