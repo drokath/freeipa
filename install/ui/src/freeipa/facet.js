@@ -1382,6 +1382,8 @@ exp.facet_header = IPA.facet_header = function(spec) {
 
     var that = exp.simple_facet_header(spec);
 
+    that.adapter = builder.build('adapter', spec.adapter || 'adapter', { context: that });
+
     that.update_breadcrumb = function(pkey) {
 
         if (!that.breadcrumb) return;
@@ -1502,7 +1504,7 @@ exp.facet_header = IPA.facet_header = function(spec) {
      */
     that.load = function(data) {
         if (!data) return;
-        var result = data.result.result;
+        var result = that.adapter.get_record(data);
         if (!that.facet.disable_facet_tabs) {
             var pkey = that.facet.get_pkey();
 
@@ -2175,14 +2177,12 @@ exp.table_facet = IPA.table_facet = function(spec, no_init) {
         pkeys_map = pkeys_map.slice(start-1, end);
 
         var columns = that.table.columns.values;
-        if (columns.length == 1) { // show primary keys only
-            that.load_records(records_map.values);
-            return;
-        }
-
-        if (that.search_all_entries) {
-            // map contains the primary keys and the complete records
-            that.load_records(records_map.values);
+        if (columns.length == 1 || that.search_all_entries) {
+            // All needed pkeys/objects are already fetched from server,
+            // so we just filter and show them.
+            that.load_records(pkeys_map.keys.map(function(x) {
+                return records_map.get(x);
+            }));
             return;
         }
 
@@ -3183,6 +3183,13 @@ exp.state_evaluator = IPA.state_evaluator = function(spec) {
      * @property {boolean}
      */
     that.first_pass = true;
+
+    /**
+     * Adapter which selects values from record on load.
+     *
+     * @property {IPA.Adapter}
+     */
+    that.adapter = builder.build('adapter', spec.adapter || 'adapter', { context: that });
 
     /**
      * Init the evaluator

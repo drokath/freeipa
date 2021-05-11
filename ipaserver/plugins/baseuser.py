@@ -31,7 +31,6 @@ from .baseldap import (
     LDAPAddAttributeViaOption, LDAPRemoveAttributeViaOption,
     add_missing_object_class)
 from ipaserver.plugins.service import (validate_realm, normalize_principal)
-from ipaserver.plugins.config import check_fips_auth_opts
 from ipalib.request import context
 from ipalib import _
 from ipalib.constants import PATTERN_GROUPUSER_NAME
@@ -481,8 +480,10 @@ class baseuser_add(LDAPCreate):
                             **options):
         assert isinstance(dn, DN)
         set_krbcanonicalname(entry_attrs)
-        check_fips_auth_opts(fips_mode=self.api.env.fips_mode, **options)
         self.obj.convert_usercertificate_pre(entry_attrs)
+        if entry_attrs.get('ipatokenradiususername', None):
+            add_missing_object_class(ldap, u'ipatokenradiusproxyuser', dn,
+                                     entry_attrs, update=False)
 
     def post_common_callback(self, ldap, dn, entry_attrs, *keys, **options):
         assert isinstance(dn, DN)
@@ -571,8 +572,10 @@ class baseuser_mod(LDAPUpdate):
             setattr(context, 'randompassword', entry_attrs['userpassword'])
 
     def check_objectclass(self, ldap, dn, entry_attrs):
-        if ('ipasshpubkey' in entry_attrs or 'ipauserauthtype' in entry_attrs
-            or 'userclass' in entry_attrs or 'ipatokenradiusconfiglink' in entry_attrs):
+        # Some attributes may require additional object classes
+        special_attrs = {'ipasshpubkey', 'ipauserauthtype', 'userclass',
+                         'ipatokenradiusconfiglink', 'ipatokenradiususername'}
+        if special_attrs.intersection(entry_attrs):
             if 'objectclass' in entry_attrs:
                 obj_classes = entry_attrs['objectclass']
             else:
@@ -600,12 +603,20 @@ class baseuser_mod(LDAPUpdate):
                     answer = self.api.Object['radiusproxy'].get_dn_if_exists(cl)
                     entry_attrs['ipatokenradiusconfiglink'] = answer
 
+            # Note: we could have used the method add_missing_object_class
+            # but since the data is already fetched and lowercased in
+            # obj_classes, it is more efficient to use the same approach
+            # as the code right above these lines
+            if 'ipatokenradiususername' in entry_attrs:
+                if 'ipatokenradiusproxyuser' not in obj_classes:
+                    entry_attrs['objectclass'].append(
+                        'ipatokenradiusproxyuser')
+
     def pre_common_callback(self, ldap, dn, entry_attrs, attrs_list, *keys,
                             **options):
         assert isinstance(dn, DN)
         add_sshpubkey_to_attrs_pre(self.context, attrs_list)
 
-        check_fips_auth_opts(fips_mode=self.api.env.fips_mode, **options)
         self.check_namelength(ldap, **options)
 
         self.check_mail(entry_attrs)

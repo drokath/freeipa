@@ -21,7 +21,9 @@
  */
 
 #include "ipa_kdb.h"
+#include "ipa_krb5.h"
 #include <unicase.h>
+#include <syslog.h>
 
 /*
  * During TGS request search by ipaKrbPrincipalName (case-insensitive)
@@ -339,6 +341,11 @@ static enum ipadb_user_auth ipadb_get_user_auth(struct ipadb_context *ipactx,
     if (gcfg != NULL)
         gua = gcfg->user_auth;
 
+    /* lcontext == NULL means ipadb_get_global_config() failed to load
+     * global config and cleared the ipactx */
+    if (ipactx->lcontext == NULL)
+        return IPADB_USER_AUTH_NONE;
+
     /* Get the user's user_auth settings if not disabled. */
     if ((gua & IPADB_USER_AUTH_DISABLED) == 0)
         ipadb_parse_user_auth(ipactx->lcontext, lentry, &ua);
@@ -496,7 +503,7 @@ static krb5_error_code ipadb_get_ldap_auth_ind(krb5_context kcontext,
     l = len;
     for (i = 0; i < count; i++) {
         ret = snprintf(ap, l, "%s ", authinds[i]);
-        if (ret <= 0 || ret > l) {
+        if (ret <= 0 || ret > (int) l) {
             ret = ENOMEM;
             goto cleanup;
         }
@@ -553,13 +560,31 @@ static krb5_error_code ipadb_parse_ldap_entry(krb5_context kcontext,
         free(entry);
         return KRB5_KDB_DBNOTINITED;
     }
-    lcontext = ipactx->lcontext;
 
     entry->magic = KRB5_KDB_MAGIC_NUMBER;
     entry->len = KRB5_KDB_V1_BASE_LENGTH;
 
     /* Get User Auth configuration. */
     ua = ipadb_get_user_auth(ipactx, lentry);
+
+    /* ipadb_get_user_auth() calls into ipadb_get_global_config()
+     * and that might fail, causing lcontext to become NULL */
+    if (!ipactx->lcontext) {
+        krb5_klog_syslog(LOG_INFO,
+                         "No LDAP connection in ipadb_parse_ldap_entry(); retrying...\n");
+        ret = ipadb_get_connection(ipactx);
+        if (ret != 0) {
+            krb5_klog_syslog(LOG_ERR,
+                             "No LDAP connection on retry in ipadb_parse_ldap_entry()!\n");
+            kerr = KRB5_KDB_INTERNAL_ERROR;
+            goto done;
+        }
+    }
+
+    /* If any code below would result in invalidating ipactx->lcontext,
+     * lcontext must be updated with the new ipactx->lcontext value.
+     * We rely on the fact that none of LDAP-parsing helpers does it. */
+    lcontext = ipactx->lcontext;
 
     /* ignore mask for now */
 
@@ -1057,7 +1082,7 @@ static krb5_flags maybe_require_preauth(struct ipadb_context *ipactx,
     struct ipadb_e_data *ied;
 
     config = ipadb_get_global_config(ipactx);
-    if (config->disable_preauth_for_spns) {
+    if (config && config->disable_preauth_for_spns) {
         ied = (struct ipadb_e_data *)entry->e_data;
         if (ied && ied->ipa_user != true) {
             /* not a user, assume SPN */
@@ -1854,7 +1879,7 @@ static krb5_error_code ipadb_get_ldap_mod_auth_ind(krb5_context kcontext,
     char *s = NULL;
     size_t ai_size = 0;
     int cnt = 0;
-    int i = 0;
+    size_t i = 0;
 
     ret = krb5_dbe_get_string(kcontext, entry, "require_auth", &ais);
     if (ret) {
@@ -2235,7 +2260,7 @@ static krb5_error_code ipadb_entry_default_attrs(struct ipadb_mods *imods)
 {
     krb5_error_code kerr;
     LDAPMod *m = NULL;
-    int i;
+    size_t i;
 
     kerr = ipadb_mods_new(imods, &m);
     if (kerr) {

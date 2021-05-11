@@ -240,6 +240,13 @@ class ServerInstallInterface(ServerCertificateInstallInterface,
     )
     master_password = master_install_only(master_password)
 
+    hidden_replica = knob(
+        None,
+        cli_names='--hidden-replica',
+        description="Install a hidden replica",
+    )
+    hidden_replica = replica_install_only(hidden_replica)
+
     domain_level = knob(
         int, constants.MAX_DOMAIN_LEVEL,
         description="IPA domain level",
@@ -442,7 +449,7 @@ class ServerInstallInterface(ServerCertificateInstallInterface,
                     "You cannot specify --external-ca-profile without "
                     "--external-ca")
 
-            if self.uninstalling:
+            if self.uninstalling:  # pylint: disable=using-constant-test
                 if (self.realm_name or self.admin_password or
                         self.master_password):
                     raise RuntimeError(

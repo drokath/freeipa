@@ -31,6 +31,7 @@ from ipatests.test_xmlrpc.test_user_plugin import get_user_result, get_group_dn
 
 from ipatests.test_xmlrpc.tracker.service_plugin import ServiceTracker
 from ipatests.test_xmlrpc.tracker.host_plugin import HostTracker
+from ipatests.util import change_principal, host_keytab
 
 import base64
 from ipapython.dn import DN
@@ -279,6 +280,60 @@ class test_service(Declarative):
             ),
         ),
 
+        dict(
+            desc='Allow admin to create keytab for %r' % service1,
+            command=('service_allow_create_keytab', [service1],
+                     dict(user=u'admin'),
+                     ),
+            expected=dict(
+                completed=1,
+                failed=dict(
+                    ipaallowedtoperform_write_keys=dict(
+                        group=[],
+                        host=[],
+                        hostgroup=[],
+                        user=[]
+                    )
+                ),
+                result=dict(
+                    dn=service1dn,
+                    ipaallowedtoperform_write_keys_user=[u'admin'],
+                    krbprincipalname=[service1],
+                    krbcanonicalname=[service1],
+                    managedby_host=[fqdn1],
+                ),
+            ),
+        ),
+
+        dict(
+            desc='Retrieve %r with all=True and keytab allowed' % service1,
+            command=('service_show', [service1], dict(all=True)),
+            expected=dict(
+                value=service1,
+                summary=None,
+                result=dict(
+                    dn=service1dn,
+                    ipaallowedtoperform_write_keys_user=[u'admin'],
+                    krbprincipalname=[service1],
+                    ipakrbprincipalalias=[service1],
+                    krbcanonicalname=[service1],
+                    objectclass=objectclasses.service + [
+                        u'ipaallowedoperations'
+                    ],
+                    ipauniqueid=[fuzzy_uuid],
+                    managedby_host=[fqdn1],
+                    has_keytab=False,
+                    ipakrbrequirespreauth=True,
+                    ipakrbokasdelegate=False,
+                    ipakrboktoauthasdelegate=False,
+                    krbpwdpolicyreference=[DN(
+                        u'cn=Default Service Password Policy',
+                        api.env.container_service,
+                        api.env.basedn,
+                    )],
+                ),
+            ),
+        ),
 
         dict(
             desc='Search for %r with members' % service1,
@@ -290,6 +345,7 @@ class test_service(Declarative):
                 result=[
                     dict(
                         dn=service1dn,
+                        ipaallowedtoperform_write_keys_user=[u'admin'],
                         krbprincipalname=[service1],
                         krbcanonicalname=[service1],
                         managedby_host=[fqdn1],
@@ -299,6 +355,30 @@ class test_service(Declarative):
             ),
         ),
 
+        dict(
+            desc='Disallow admin to create keytab for %r' % service1,
+            command=(
+                'service_disallow_create_keytab', [service1],
+                dict(user=u'admin'),
+            ),
+            expected=dict(
+                completed=1,
+                failed=dict(
+                    ipaallowedtoperform_write_keys=dict(
+                        group=[],
+                        host=[],
+                        hostgroup=[],
+                        user=[]
+                    )
+                ),
+                result=dict(
+                    dn=service1dn,
+                    krbprincipalname=[service1],
+                    krbcanonicalname=[service1],
+                    managedby_host=[fqdn1],
+                ),
+            ),
+        ),
 
         dict(
             desc='Search for %r' % service1,
@@ -332,7 +412,9 @@ class test_service(Declarative):
                         krbprincipalname=[service1],
                         ipakrbprincipalalias=[service1],
                         krbcanonicalname=[service1],
-                        objectclass=objectclasses.service,
+                        objectclass=objectclasses.service + [
+                            u'ipaallowedoperations'
+                        ],
                         ipauniqueid=[fuzzy_uuid],
                         has_keytab=False,
                         managedby_host=[fqdn1],
@@ -706,28 +788,109 @@ class test_service(Declarative):
         dict(
             desc='Delete the current host (master?) %s HTTP service, should be caught' % api.env.host,
             command=('service_del', ['HTTP/%s' % api.env.host], {}),
-            expected=errors.ValidationError(name='principal', error='This principal is required by the IPA master'),
+            expected=errors.ValidationError(
+                name='principal',
+                error='HTTP/%s@%s is required by the IPA master' % (
+                    api.env.host,
+                    api.env.realm
+                )
+            ),
         ),
 
+        # DN is case insensitive, see https://pagure.io/freeipa/issue/8308
+        dict(
+            desc=(
+                'Delete the current host (master?) %s HTTP service, should '
+                'be caught'
+            ) % api.env.host,
+            command=('service_del', ['http/%s' % api.env.host], {}),
+            expected=errors.ValidationError(
+                name='principal',
+                error='http/%s@%s is required by the IPA master' % (
+                    api.env.host,
+                    api.env.realm
+                )
+            ),
+        ),
 
         dict(
             desc='Delete the current host (master?) %s ldap service, should be caught' % api.env.host,
             command=('service_del', ['ldap/%s' % api.env.host], {}),
-            expected=errors.ValidationError(name='principal', error='This principal is required by the IPA master'),
+            expected=errors.ValidationError(
+                name='principal',
+                error='ldap/%s@%s is required by the IPA master' % (
+                    api.env.host,
+                    api.env.realm
+                )
+            ),
+        ),
+
+
+        dict(
+            desc=('Delete the current host (master?) %s dns service,'
+                  ' should be caught' % api.env.host),
+            command=('service_del', ['DNS/%s' % api.env.host], {}),
+            expected=errors.ValidationError(
+                name='principal',
+                error='DNS/%s@%s is required by the IPA master' % (
+                    api.env.host,
+                    api.env.realm
+                )
+            ),
         ),
 
 
         dict(
             desc='Disable the current host (master?) %s HTTP service, should be caught' % api.env.host,
             command=('service_disable', ['HTTP/%s' % api.env.host], {}),
-            expected=errors.ValidationError(name='principal', error='This principal is required by the IPA master'),
+            expected=errors.ValidationError(
+                name='principal',
+                error='HTTP/%s@%s is required by the IPA master' % (
+                    api.env.host,
+                    api.env.realm
+                )
+            ),
         ),
 
+        dict(
+            desc=(
+                'Disable the current host (master?) %s HTTP service, should '
+                'be caught'
+            ) % api.env.host,
+            command=('service_disable', ['http/%s' % api.env.host], {}),
+            expected=errors.ValidationError(
+                name='principal',
+                error='http/%s@%s is required by the IPA master' % (
+                    api.env.host,
+                    api.env.realm
+                )
+            ),
+        ),
 
         dict(
             desc='Disable the current host (master?) %s ldap service, should be caught' % api.env.host,
             command=('service_disable', ['ldap/%s' % api.env.host], {}),
-            expected=errors.ValidationError(name='principal', error='This principal is required by the IPA master'),
+            expected=errors.ValidationError(
+                name='principal',
+                error='ldap/%s@%s is required by the IPA master' % (
+                    api.env.host,
+                    api.env.realm
+                )
+            ),
+        ),
+
+
+        dict(
+            desc=('Disable the current host (master?) %s dns service,'
+                  ' should be caught' % api.env.host),
+            command=('service_disable', ['DNS/%s' % api.env.host], {}),
+            expected=errors.ValidationError(
+                name='principal',
+                error='DNS/%s@%s is required by the IPA master' % (
+                    api.env.host,
+                    api.env.realm
+                )
+            ),
         ),
 
 
@@ -1343,3 +1506,30 @@ class TestAuthenticationIndicators(XMLRPC_test):
             updates={u'krbprincipalauthind': u'radius'},
             expected_updates={u'krbprincipalauthind': [u'radius']}
         )
+
+
+@pytest.fixture(scope='function')
+def managing_host(request):
+    tracker = HostTracker(name=u'managinghost2', fqdn=fqdn2)
+    return tracker.make_fixture(request)
+
+
+@pytest.fixture(scope='function')
+def managed_service(request):
+    tracker = ServiceTracker(
+        name=u'managed-service', host_fqdn=fqdn2)
+    return tracker.make_fixture(request)
+
+
+@pytest.mark.tier1
+class TestManagedServices(XMLRPC_test):
+    def test_managed_service(
+            self, managing_host, managed_service):
+        """ Add a host and then add a service as a host
+            Finally, remove the service as a host """
+        managing_host.ensure_exists()
+        with host_keytab(managing_host.name) as keytab_filename:
+            with change_principal(managing_host.attrs['krbcanonicalname'][0],
+                                  keytab=keytab_filename):
+                managed_service.create()
+                managed_service.delete()

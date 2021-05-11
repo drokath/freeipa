@@ -32,6 +32,7 @@ from ipaserver.install import (replication, installutils, bindinstance,
 from ipalib import api, errors
 from ipalib.util import has_managed_topology
 from ipapython import ipautil, ipaldap, version
+from ipapython.admintool import ScriptError
 from ipapython.dn import DN
 
 logger = logging.getLogger(os.path.basename(__file__))
@@ -69,8 +70,7 @@ def parse_options():
 
     if len(args):
         n = len(args) - 1
-        k = commands.keys()
-        for cmd in k:
+        for cmd in commands:
             if cmd == args[0]:
                 v = commands[cmd]
                 err = None
@@ -134,16 +134,18 @@ def list_replicas(realm, host, replica, dirman_passwd, verbose):
         print('%s' % entry.single_value.get('nsds5replicahost'))
 
         if verbose:
-            print("  last init status: %s" % entry.single_value.get(
-                'nsds5replicalastinitstatus'))
-            print("  last init ended: %s" % str(
-                ipautil.parse_generalized_time(
-                    entry.single_value['nsds5replicalastinitend'])))
+            initstatus = entry.single_value.get('nsds5replicalastinitstatus')
+            if initstatus is not None:
+                print("  last init status: %s" % initstatus)
+                print("  last init ended: %s" % str(
+                    ipautil.parse_generalized_time(
+                        entry.single_value['nsds5replicalastinitend'])))
             print("  last update status: %s" % entry.single_value.get(
                 'nsds5replicalastupdatestatus'))
             print("  last update ended: %s" % str(
                 ipautil.parse_generalized_time(
                     entry.single_value['nsds5replicalastupdateend'])))
+
 
 def del_link(realm, replica1, replica2, dirman_passwd, force=False):
 
@@ -408,6 +410,7 @@ def exit_on_managed_topology(what, hint="topologysegment"):
 
 
 def main():
+    installutils.check_server_configuration()
     options, args = parse_options()
 
     # Just initialize the environment. This is so the installer can have
@@ -496,7 +499,7 @@ try:
     main()
 except KeyboardInterrupt:
     sys.exit(1)
-except SystemExit as e:
+except (SystemExit, ScriptError) as e:
     sys.exit(e)
 except Exception as e:
     sys.exit("unexpected error: %s" % e)

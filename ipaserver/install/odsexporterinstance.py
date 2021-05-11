@@ -2,6 +2,8 @@
 # Copyright (C) 2014  FreeIPA Contributors see COPYING for license
 #
 
+from __future__ import absolute_import
+
 import logging
 import os
 import pwd
@@ -71,8 +73,8 @@ class ODSExporterInstance(service.Service):
     def __enable(self):
 
         try:
-            self.ldap_enable('DNSKeyExporter', self.fqdn, None,
-                             self.suffix)
+            self.ldap_configure('DNSKeyExporter', self.fqdn, None,
+                                self.suffix)
         except errors.DuplicateEntry:
             logger.error("DNSKeyExporter service already exists")
 

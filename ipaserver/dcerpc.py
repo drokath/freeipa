@@ -22,6 +22,8 @@
 # Make sure we only run this module at the server where samba4-python
 # package is installed to avoid issues with unavailable modules
 
+from __future__ import absolute_import
+
 import logging
 import re
 import time
@@ -30,6 +32,8 @@ from ipalib import api, _
 from ipalib import errors
 from ipapython import ipautil
 from ipapython.dn import DN
+from ipapython.dnsutil import query_srv
+from ipapython.ipaldap import ldap_initialize
 from ipaserver.install import installutils
 from ipaserver.dcerpc_common import (TRUST_BIDIRECTIONAL,
                                      TRUST_JOIN_EXTERNAL,
@@ -48,11 +52,20 @@ from samba.ndr import ndr_pack, ndr_print
 from samba import net
 from samba import arcfour_encrypt
 import samba
+try:
+    from samba import ntstatus
+except ImportError:
+    from collections import namedtuple
+    # samba.ntstatus is available from Samba 4.7.0 but
+    # Python 3 version of the binding was only added in Samba 4.8.0
+    # We simulate the constant namespace for the single constant
+    # we use here. With Fedora 27 retire we can get rid of it.
+    ntstatus = namedtuple('NTStatus',
+                          ['NT_STATUS_INVALID_PARAMETER'])(-1073741811)
 
 import ldap as _ldap
 from ipapython import ipaldap
 from ipapython.dnsutil import DNSName
-from dns import resolver, rdatatype
 from dns.exception import DNSException
 import pysss_nss_idmap
 import pysss
@@ -65,7 +78,7 @@ from time import sleep
 try:
     from ldap.controls import RequestControl as LDAPControl
 except ImportError:
-    from ldap.controls import LDAPControl as LDAPControl
+    from ldap.controls import LDAPControl
 
 if six.PY3:
     unicode = str
@@ -154,7 +167,6 @@ class TrustTopologyConflictSolved(Exception):
     No separate errno is assigned as this error should
     not be visible outside the dcerpc.py code.
     """
-    pass
 
 
 def assess_dcerpc_error(error):
@@ -406,7 +418,12 @@ class DomainValidator(object):
         if object_name in result and \
            (pysss_nss_idmap.SID_KEY in result[object_name]):
             object_sid = result[object_name][pysss_nss_idmap.SID_KEY]
-            return object_sid
+            if self.is_trusted_sid_valid(object_sid):
+                return object_sid
+            else:
+                raise errors.ValidationError(name=_('trusted domain object'),
+                                             error=_('Object does not belong '
+                                                     'to a trusted domain'))
 
         # If fallback to AD DC LDAP is not allowed, bail out
         if not fallback_to_ldap:
@@ -746,6 +763,7 @@ class DomainValidator(object):
                         logger.warning('%s', msg)
 
                 return entries
+        return None
 
     def __retrieve_trusted_domain_gc_list(self, domain):
         """
@@ -799,7 +817,7 @@ class DomainValidator(object):
             gc_name = '_gc._tcp.%s.' % info['dns_domain']
 
             try:
-                answers = resolver.query(gc_name, rdatatype.SRV)
+                answers = query_srv(gc_name)
             except DNSException as e:
                 answers = []
 
@@ -933,7 +951,7 @@ class TrustDomainInstance(object):
         # We need to do rootDSE search with LDAP_SERVER_EXTENDED_DN_OID
         # control to reveal the SID
         ldap_uri = 'ldap://%s' % (result.pdc_dns_name)
-        conn = _ldap.initialize(ldap_uri)
+        conn = ldap_initialize(ldap_uri)
         conn.set_option(_ldap.OPT_SERVER_CONTROLS, [ExtendedDNControl()])
         search_result = None
         try:
@@ -1048,7 +1066,7 @@ class TrustDomainInstance(object):
         Only top level name and top level name exclusions are handled here.
         """
         if not another_domain.ftinfo_records:
-            return
+            return None
 
         ftinfo_records = []
         info = lsa.ForestTrustInformation()
@@ -1105,6 +1123,25 @@ class TrustDomainInstance(object):
         original forest.
         """
 
+        def domain_name_from_ftinfo(ftinfo):
+            """
+            Returns a domain name string from a ForestTrustRecord
+
+            :param ftinfo: LSA ForestTrustRecord to parse
+            """
+            if ftinfo.type == lsa.LSA_FOREST_TRUST_DOMAIN_INFO:
+                return ftinfo.forest_trust_data.dns_domain_name.string
+            elif ftinfo.type == lsa.LSA_FOREST_TRUST_TOP_LEVEL_NAME:
+                return ftinfo.forest_trust_data.string
+            elif ftinfo.type == lsa.LSA_FOREST_TRUST_TOP_LEVEL_NAME_EX:
+                # We should ignore TLN exclusion record because it
+                # is already an exclusion so we aren't going to
+                # change anything here
+                return None
+            else:
+                # Ignore binary blobs we don't know about
+                return None
+
         # List of entries for unsolved conflicts
         result = []
 
@@ -1137,22 +1174,49 @@ class TrustDomainInstance(object):
 
                 # Copy over the entries, extend with TLN exclusion
                 entries = []
+                is_our_record = False
                 for e in dominfo.entries:
                     e1 = lsa.ForestTrustRecord()
                     e1.type = e.type
                     e1.flags = e.flags
                     e1.time = e.time
                     e1.forest_trust_data = e.forest_trust_data
+
+                    # We either have a domain struct, a TLN name,
+                    # or a TLN exclusion name in the list.
+                    # The rest we should skip, those are binary blobs
+                    dns_domain_name = domain_name_from_ftinfo(e)
+
+                    # Search for a match in the topology of another domain
+                    # if there is a match, we have to convert a record
+                    # into a TLN exclusion to allow its routing to the
+                    # another domain
+                    for r in another_domain.ftinfo_records:
+                        # r['rec_name'] cannot be None, thus we can ignore
+                        # the case when dns_domain_name is None
+                        if r['rec_name'] == dns_domain_name:
+                            is_our_record = True
+
+                            # Convert e1 into an exclusion record
+                            e1.type = lsa.LSA_FOREST_TRUST_TOP_LEVEL_NAME_EX
+                            e1.flags = 0
+                            e1.time = trust_timestamp
+                            e1.forest_trust_data.string = dns_domain_name
+                            break
                     entries.append(e1)
 
-                # Create TLN exclusion record
-                record = lsa.ForestTrustRecord()
-                record.type = lsa.LSA_FOREST_TRUST_TOP_LEVEL_NAME_EX
-                record.flags = 0
-                record.time = trust_timestamp
-                record.forest_trust_data.string = \
-                    another_domain.info['dns_domain']
-                entries.append(record)
+                # If no candidate for the exclusion entry was found
+                # make sure it is the other domain itself, this covers
+                # a most common case
+                if not is_our_record:
+                    # Create TLN exclusion record for the top level domain
+                    record = lsa.ForestTrustRecord()
+                    record.type = lsa.LSA_FOREST_TRUST_TOP_LEVEL_NAME_EX
+                    record.flags = 0
+                    record.time = trust_timestamp
+                    record.forest_trust_data.string = \
+                        another_domain.info['dns_domain']
+                    entries.append(record)
 
                 fti = lsa.ForestTrustInformation()
                 fti.count = len(entries)
@@ -1161,11 +1225,29 @@ class TrustDomainInstance(object):
                 # Update the forest trust information now
                 ldname = lsa.StringLarge()
                 ldname.string = rec.name.string
-                cninfo = self._pipe.lsaRSetForestTrustInformation(
-                             self._policy_handle,
-                             ldname,
-                             lsa.LSA_FOREST_TRUST_DOMAIN_INFO,
-                             fti, 0)
+                cninfo = None
+                try:
+                    cninfo = self._pipe.lsaRSetForestTrustInformation(
+                        self._policy_handle,
+                        ldname,
+                        lsa.LSA_FOREST_TRUST_DOMAIN_INFO,
+                        fti, 0)
+                except samba.NTSTATUSError as error:
+                    # Handle NT_STATUS_INVALID_PARAMETER separately
+                    if ntstatus.NT_STATUS_INVALID_PARAMETER == error.args[0]:
+                        result.append(rec)
+                        logger.error("Unable to resolve conflict for "
+                                     "DNS domain %s in the forest %s "
+                                     "for in-forest domain %s. Trust cannot "
+                                     "be established unless this conflict "
+                                     "is fixed manually.",
+                                     another_domain.info['dns_domain'],
+                                     self.info['dns_domain'],
+                                     rec.name.string)
+                    else:
+                        raise assess_dcerpc_error(error)
+
+
                 if cninfo:
                     result.append(rec)
                     logger.error("When defining exception for DNS "
@@ -1194,9 +1276,9 @@ class TrustDomainInstance(object):
         # Otherwise, raise TrustTopologyConflictError() exception
         domains = [x.name.string for x in result]
         raise errors.TrustTopologyConflictError(
-                              target=self.info['dns_domain'],
-                              conflict=another_domain.info['dns_domain'],
-                              domains=domains)
+            forest=self.info['dns_domain'],
+            conflict=another_domain.info['dns_domain'],
+            domains=domains)
 
 
 
@@ -1706,8 +1788,8 @@ class TrustDomainJoins(object):
         self.local_domain.establish_trust(self.remote_domain,
                                           trustdom_passwd,
                                           trust_type, trust_external)
-        return dict(
-                    local=self.local_domain,
-                    remote=self.remote_domain,
-                    verified=False
-                   )
+        return {
+            'local': self.local_domain,
+            'remote': self.remote_domain,
+            'verified': False,
+        }

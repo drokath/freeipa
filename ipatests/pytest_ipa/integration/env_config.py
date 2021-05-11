@@ -31,7 +31,7 @@ import collections
 import six
 
 from ipapython import ipautil
-from ipatests.pytest_plugins.integration.config import Config, Domain
+from ipatests.pytest_ipa.integration.config import Config, Domain
 from ipalib.constants import MAX_DOMAIN_LEVEL
 
 TESTHOST_PREFIX = 'TESTHOST_'
@@ -143,15 +143,21 @@ def config_from_env(env):
 
     domain_index = 1
     while (env.get('MASTER_env%s' % domain_index) or
-            env.get('AD_env%s' % domain_index)):
+           env.get('AD_env%s' % domain_index) or
+           env.get('AD_SUBDOMAIN_env%s' % domain_index) or
+           env.get('AD_TREEDOMAIN_env%s' % domain_index)):
 
         if env.get('MASTER_env%s' % domain_index):
             # IPA domain takes precedence to AD domain in case of conflict
             config.domains.append(domain_from_env(env, config, domain_index,
                                                   domain_type='IPA'))
         else:
-            config.domains.append(domain_from_env(env, config, domain_index,
-                                                  domain_type='AD'))
+            for domain_type in ('AD', 'AD_SUBDOMAIN', 'AD_TREEDOMAIN'):
+                if env.get('%s_env%s' % (domain_type, domain_index)):
+                    config.domains.append(
+                        domain_from_env(env, config, domain_index,
+                                        domain_type=domain_type))
+                    break
         domain_index += 1
 
     return config
@@ -276,7 +282,7 @@ def domain_from_env(env, config, index, domain_type):
     if domain_type == 'IPA':
         master_role = 'MASTER'
     else:
-        master_role = 'AD'
+        master_role = domain_type
 
     env_suffix = '_env%s' % index
 

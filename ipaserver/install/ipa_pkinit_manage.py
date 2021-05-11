@@ -2,13 +2,14 @@
 # Copyright (C) 2017  FreeIPA Contributors see COPYING for license
 #
 
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 
 import logging
 
 from ipalib import api
 from ipaplatform.paths import paths
 from ipapython.admintool import AdminTool
+from ipaserver.install import installutils
 from ipaserver.install.krbinstance import KrbInstance, is_pkinit_enabled
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ class PKINITManage(AdminTool):
 
     def validate_options(self):
         super(PKINITManage, self).validate_options(needs_root=True)
+        installutils.check_server_configuration()
 
         option_parser = self.option_parser
 
@@ -70,6 +72,8 @@ class PKINITManage(AdminTool):
                 if ca_enabled:
                     logger.warning(
                         "Failed to stop tracking certificates: %s", e)
+            # remove the cert and key
+            krb.delete_pkinit_cert()
 
             krb.enable_ssl()
 

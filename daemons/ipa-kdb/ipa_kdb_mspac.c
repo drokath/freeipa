@@ -25,7 +25,6 @@
 #include "ipa_kdb.h"
 #include "ipa_mspac.h"
 #include <talloc.h>
-#include <syslog.h>
 #include <unicase.h>
 #include "util/time.h"
 #include "gen_ndr/ndr_krb5pac.h"
@@ -159,9 +158,9 @@ int string_to_sid(const char *str, struct dom_sid *sid)
 
 char *dom_sid_string(TALLOC_CTX *memctx, const struct dom_sid *dom_sid)
 {
-    size_t c;
+    int8_t c;
     size_t len;
-    int ofs;
+    size_t ofs;
     uint32_t ia;
     char *buf;
 
@@ -387,7 +386,6 @@ static krb5_error_code ipadb_fill_info3(struct ipadb_context *ipactx,
                                         TALLOC_CTX *memctx,
                                         struct netr_SamInfo3 *info3)
 {
-    LDAP *lcontext = ipactx->lcontext;
     LDAPDerefRes *deref_results = NULL;
     struct dom_sid sid;
     gid_t prigid = -1;
@@ -404,7 +402,7 @@ static krb5_error_code ipadb_fill_info3(struct ipadb_context *ipactx,
     krb5_principal princ;
     krb5_data *data;
 
-    ret = ipadb_ldap_attr_to_strlist(lcontext, lentry, "objectClass",
+    ret = ipadb_ldap_attr_to_strlist(ipactx->lcontext, lentry, "objectClass",
                                      &objectclasses);
     if (ret == 0 && objectclasses != NULL) {
         for (c = 0; objectclasses[c] != NULL; c++) {
@@ -428,7 +426,7 @@ static krb5_error_code ipadb_fill_info3(struct ipadb_context *ipactx,
     }
 
     if (is_host) {
-        ret = ipadb_ldap_attr_to_str(lcontext, lentry, "fqdn", &strres);
+        ret = ipadb_ldap_attr_to_str(ipactx->lcontext, lentry, "fqdn", &strres);
         if (ret) {
             /* fqdn is mandatory for hosts */
             return ret;
@@ -441,7 +439,8 @@ static krb5_error_code ipadb_fill_info3(struct ipadb_context *ipactx,
             return ENOENT;
         }
     } else if (is_service) {
-        ret = ipadb_ldap_attr_to_str(lcontext, lentry, "krbPrincipalName", &strres);
+        ret = ipadb_ldap_attr_to_str(ipactx->lcontext, lentry,
+                                     "krbCanonicalName", &strres);
         if (ret) {
             /* krbPrincipalName is mandatory for services */
             return ret;
@@ -490,7 +489,7 @@ static krb5_error_code ipadb_fill_info3(struct ipadb_context *ipactx,
             return ENOENT;
         }
     } else {
-        ret = ipadb_ldap_attr_to_str(lcontext, lentry, "uid", &strres);
+        ret = ipadb_ldap_attr_to_str(ipactx->lcontext, lentry, "uid", &strres);
         if (ret) {
             /* uid is mandatory */
             return ret;
@@ -503,7 +502,8 @@ static krb5_error_code ipadb_fill_info3(struct ipadb_context *ipactx,
     if (is_host || is_service) {
         prigid = 515; /* Well known RID for domain computers group */
     } else {
-        ret = ipadb_ldap_attr_to_int(lcontext, lentry, "gidNumber", &intres);
+        ret = ipadb_ldap_attr_to_int(ipactx->lcontext, lentry,
+                                     "gidNumber", &intres);
         if (ret) {
             /* gidNumber is mandatory */
             return ret;
@@ -534,7 +534,7 @@ static krb5_error_code ipadb_fill_info3(struct ipadb_context *ipactx,
     info3->base.kickoff_time = -1;
 #endif
 
-    ret = ipadb_ldap_attr_to_time_t(lcontext, lentry,
+    ret = ipadb_ldap_attr_to_time_t(ipactx->lcontext, lentry,
                                     "krbLastPwdChange", &timeres);
     switch (ret) {
     case 0:
@@ -551,7 +551,7 @@ static krb5_error_code ipadb_fill_info3(struct ipadb_context *ipactx,
     info3->base.allow_password_change = 0;
     info3->base.force_password_change = -1;
 
-    ret = ipadb_ldap_attr_to_str(lcontext, lentry, "cn", &strres);
+    ret = ipadb_ldap_attr_to_str(ipactx->lcontext, lentry, "cn", &strres);
     switch (ret) {
     case 0:
         info3->base.full_name.string = talloc_strdup(memctx, strres);
@@ -564,7 +564,7 @@ static krb5_error_code ipadb_fill_info3(struct ipadb_context *ipactx,
         return ret;
     }
 
-    ret = ipadb_ldap_attr_to_str(lcontext, lentry,
+    ret = ipadb_ldap_attr_to_str(ipactx->lcontext, lentry,
                                  "ipaNTLogonScript", &strres);
     switch (ret) {
     case 0:
@@ -578,7 +578,7 @@ static krb5_error_code ipadb_fill_info3(struct ipadb_context *ipactx,
         return ret;
     }
 
-    ret = ipadb_ldap_attr_to_str(lcontext, lentry,
+    ret = ipadb_ldap_attr_to_str(ipactx->lcontext, lentry,
                                  "ipaNTProfilePath", &strres);
     switch (ret) {
     case 0:
@@ -592,7 +592,7 @@ static krb5_error_code ipadb_fill_info3(struct ipadb_context *ipactx,
         return ret;
     }
 
-    ret = ipadb_ldap_attr_to_str(lcontext, lentry,
+    ret = ipadb_ldap_attr_to_str(ipactx->lcontext, lentry,
                                  "ipaNTHomeDirectory", &strres);
     switch (ret) {
     case 0:
@@ -606,7 +606,7 @@ static krb5_error_code ipadb_fill_info3(struct ipadb_context *ipactx,
         return ret;
     }
 
-    ret = ipadb_ldap_attr_to_str(lcontext, lentry,
+    ret = ipadb_ldap_attr_to_str(ipactx->lcontext, lentry,
                                  "ipaNTHomeDirectoryDrive", &strres);
     switch (ret) {
     case 0:
@@ -627,7 +627,7 @@ static krb5_error_code ipadb_fill_info3(struct ipadb_context *ipactx,
         /* Well know RID of domain controllers group */
         info3->base.rid = 516;
     } else {
-        ret = ipadb_ldap_attr_to_str(lcontext, lentry,
+        ret = ipadb_ldap_attr_to_str(ipactx->lcontext, lentry,
                                      "ipaNTSecurityIdentifier", &strres);
         if (ret) {
             /* SID is mandatory */
@@ -644,7 +644,7 @@ static krb5_error_code ipadb_fill_info3(struct ipadb_context *ipactx,
         }
     }
 
-    ret = ipadb_ldap_deref_results(lcontext, lentry, &deref_results);
+    ret = ipadb_ldap_deref_results(ipactx->lcontext, lentry, &deref_results);
     switch (ret) {
     LDAPDerefRes *dres;
     LDAPDerefVal *dval;
@@ -2121,6 +2121,7 @@ krb5_error_code ipadb_sign_authdata(krb5_context context,
     int result;
     krb5_db_entry *client_entry = NULL;
     krb5_boolean is_equal;
+    bool force_reinit_mspac = false;
 
 
     is_as_req = ((flags & KRB5_KDB_FLAG_CLIENT_REFERRALS_ONLY) != 0);
@@ -2174,23 +2175,29 @@ krb5_error_code ipadb_sign_authdata(krb5_context context,
     }
 
     if (with_pac && make_ad) {
+
+        ipactx = ipadb_get_context(context);
+        if (!ipactx) {
+            kerr = ENOMEM;
+            goto done;
+        }
+
         /* Be aggressive here: special case for discovering range type
-         * immediately after establishing the trust by IPA framework */
+         * immediately after establishing the trust by IPA framework. For all
+         * other cases call ipadb_reinit_mspac() with force_reinit_mspac set
+         * to 'false' to make sure the information about trusted domains is
+         * updated on a regular basis for all worker processes. */
         if ((krb5_princ_size(context, ks_client_princ) == 2) &&
             (strncmp(krb5_princ_component(context, ks_client_princ, 0)->data, "HTTP",
-                     krb5_princ_component(context, ks_client_princ, 0)->length) == 0)) {
-            ipactx = ipadb_get_context(context);
-            if (!ipactx) {
-                kerr = ENOMEM;
-                goto done;
-            }
-            if (ulc_casecmp(krb5_princ_component(context, ks_client_princ, 1)->data,
-                            krb5_princ_component(context, ks_client_princ, 1)->length,
-                            ipactx->kdc_hostname, strlen(ipactx->kdc_hostname),
-                            NULL, NULL, &result) == 0) {
-                (void)ipadb_reinit_mspac(ipactx, true);
-            }
+                     krb5_princ_component(context, ks_client_princ, 0)->length) == 0) &&
+            (ulc_casecmp(krb5_princ_component(context, ks_client_princ, 1)->data,
+                         krb5_princ_component(context, ks_client_princ, 1)->length,
+                         ipactx->kdc_hostname, strlen(ipactx->kdc_hostname),
+                         NULL, NULL, &result) == 0)) {
+            force_reinit_mspac = true;
         }
+
+        (void)ipadb_reinit_mspac(ipactx, force_reinit_mspac);
 
         kerr = ipadb_get_pac(context, client, &pac);
         if (kerr != 0 && kerr != ENOENT) {
@@ -2319,9 +2326,10 @@ void ipadb_mspac_struct_free(struct ipadb_mspac **mspac)
     *mspac = NULL;
 }
 
-krb5_error_code ipadb_adtrusts_fill_sid_blacklist(char **source_sid_blacklist,
-                                                  struct dom_sid **result_sids,
-                                                  int *result_length)
+static krb5_error_code
+ipadb_adtrusts_fill_sid_blacklist(char **source_sid_blacklist,
+                                  struct dom_sid **result_sids,
+                                  int *result_length)
 {
     int len, i;
     char **source;
@@ -2352,9 +2360,10 @@ krb5_error_code ipadb_adtrusts_fill_sid_blacklist(char **source_sid_blacklist,
     return 0;
 }
 
-krb5_error_code ipadb_adtrusts_fill_sid_blacklists(struct ipadb_adtrusts *adtrust,
-                                                   char **sid_blacklist_incoming,
-                                                   char **sid_blacklist_outgoing)
+static krb5_error_code
+ipadb_adtrusts_fill_sid_blacklists(struct ipadb_adtrusts *adtrust,
+                                   char **sid_blacklist_incoming,
+                                   char **sid_blacklist_outgoing)
 {
     krb5_error_code kerr;
 
@@ -2375,7 +2384,8 @@ krb5_error_code ipadb_adtrusts_fill_sid_blacklists(struct ipadb_adtrusts *adtrus
     return 0;
 }
 
-krb5_error_code ipadb_mspac_check_trusted_domains(struct ipadb_context *ipactx)
+static krb5_error_code
+ipadb_mspac_check_trusted_domains(struct ipadb_context *ipactx)
 {
     char *attrs[] = { NULL };
     char *filter = "(objectclass=ipaNTTrustedDomain)";
@@ -2420,10 +2430,11 @@ static void ipadb_free_sid_blacklists(char ***sid_blacklist_incoming, char ***si
     }
 }
 
-krb5_error_code ipadb_mspac_get_trusted_domains(struct ipadb_context *ipactx)
+static krb5_error_code
+ipadb_mspac_get_trusted_domains(struct ipadb_context *ipactx)
 {
     struct ipadb_adtrusts *t;
-    LDAP *lc = ipactx->lcontext;
+    LDAP *lc = NULL;
     char *attrs[] = { "cn", "ipaNTTrustPartner", "ipaNTFlatName",
                       "ipaNTTrustedDomainSID", "ipaNTSIDBlacklistIncoming",
                       "ipaNTSIDBlacklistOutgoing", "ipaNTAdditionalSuffixes", NULL };
@@ -2457,6 +2468,7 @@ krb5_error_code ipadb_mspac_get_trusted_domains(struct ipadb_context *ipactx)
         goto done;
     }
 
+    lc = ipactx->lcontext;
     for (le = ldap_first_entry(lc, res); le; le = ldap_next_entry(lc, le)) {
         dnstr = ldap_get_dn(lc, le);
 
@@ -2579,6 +2591,12 @@ krb5_error_code ipadb_mspac_get_trusted_domains(struct ipadb_context *ipactx)
         }
 
         /* We should have a single AVA in the domain RDN */
+        if (rdn == NULL) {
+            ldap_dnfree(dn);
+            ret = EINVAL;
+            goto done;
+        }
+
         t[n].parent_name = strndup(rdn[0]->la_value.bv_val, rdn[0]->la_value.bv_len);
 
         ldap_dnfree(dn);

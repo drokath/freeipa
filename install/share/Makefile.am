@@ -76,6 +76,7 @@ dist_app_DATA =				\
 	modrdn-krbprinc.ldif		\
 	entryusn.ldif			\
 	root-autobind.ldif		\
+	pw-logging-conf.ldif	\
 	sudobind.ldif			\
 	automember.ldif			\
 	replica-automember.ldif		\
@@ -85,6 +86,7 @@ dist_app_DATA =				\
 	kdcproxy-enable.uldif		\
 	kdcproxy-disable.uldif		\
 	ipa-httpd.conf.template		\
+	ipa-httpd-wsgi.conf.template	\
 	gssapi.login			\
 	gssproxy.conf.template		\
 	kdcproxy.wsgi			\

@@ -16,6 +16,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
+from __future__ import absolute_import
+
 import logging
 import os
 import shutil
@@ -78,7 +80,7 @@ keys /etc/ntp/keys
 #controlkey 8
 """
 
-ntp_sysconfig = """OPTIONS="-x -p /var/run/ntpd.pid"
+ntp_sysconfig = """OPTIONS="-p /var/run/ntpd.pid"
 
 # Set to 'yes' to sync hw clock after successful ntpdate
 SYNC_HWCLOCK=yes

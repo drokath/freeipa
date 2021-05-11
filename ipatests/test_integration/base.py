@@ -20,8 +20,9 @@
 """Base class for FreeIPA integration tests"""
 
 import pytest
+import subprocess
 
-from ipatests.pytest_plugins.integration import tasks
+from ipatests.pytest_ipa.integration import tasks
 from pytest_sourceorder import ordered
 
 
@@ -32,6 +33,8 @@ class IntegrationTest(object):
     num_replicas = 0
     num_clients = 0
     num_ad_domains = 0
+    num_ad_subdomains = 0
+    num_ad_treedomains = 0
     required_extra_roles = []
     topology = None
     domain_level = None
@@ -76,8 +79,20 @@ class IntegrationTest(object):
 
     @classmethod
     def uninstall(cls, mh):
-        tasks.uninstall_master(cls.master)
+        if cls.domain_level is not None:
+            domain_level = cls.domain_level
+        else:
+            domain_level = cls.master.config.domain_level
         for replica in cls.replicas:
-            tasks.uninstall_master(replica)
+            try:
+                tasks.run_server_del(
+                    cls.master, replica.hostname, force=True,
+                    ignore_topology_disconnect=True, ignore_last_of_role=True)
+            except subprocess.CalledProcessError:
+                # If the master has already been uninstalled,
+                # this call may fail
+                pass
+            tasks.uninstall_master(replica, domain_level=domain_level)
+        tasks.uninstall_master(cls.master, domain_level=domain_level)
         for client in cls.clients:
             tasks.uninstall_client(client)

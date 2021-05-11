@@ -1132,9 +1132,11 @@ class DN(object):
             rdns = list(reversed([
                 [get_ava(
                     ATTR_NAME_BY_OID.get(ava.oid, ava.oid.dotted_string),
-                    ava.value)]
-                for ava in value
+                    ava.value) for ava in rdn]
+                for rdn in value.rdns
             ]))
+            for rdn in rdns:
+                sort_avas(rdn)
         else:
             raise TypeError(
                 "must be str, unicode, tuple, Name, RDN or DN, got %s instead"

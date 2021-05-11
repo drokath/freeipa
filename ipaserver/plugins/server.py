@@ -2,6 +2,8 @@
 # Copyright (C) 2015  FreeIPA Contributors see COPYING for license
 #
 
+from __future__ import absolute_import
+
 import logging
 
 import dbus
@@ -10,7 +12,7 @@ import ldap
 import time
 
 from ipalib import api, crud, errors, messages
-from ipalib import Int, Flag, Str, DNSNameParam
+from ipalib import Int, Flag, Str, StrEnum, DNSNameParam
 from ipalib.plugable import Registry
 from .baseldap import (
     LDAPSearch,
@@ -26,8 +28,10 @@ from ipaplatform import services
 from ipapython.dn import DN
 from ipapython.dnsutil import DNSName
 from ipaserver import topology
-from ipaserver.servroles import ENABLED
+from ipaserver.servroles import ENABLED, HIDDEN
 from ipaserver.install import bindinstance, dnskeysyncinstance
+from ipaserver.install.service import hide_services, enable_services
+from ipaserver.plugins.privilege import principal_has_privilege
 
 __doc__ = _("""
 IPA servers
@@ -203,7 +207,10 @@ class server(LDAPObject):
             return
 
         enabled_roles = self.api.Command.server_role_find(
-            server_server=entry_attrs['cn'][0], status=ENABLED)['result']
+            server_server=entry_attrs['cn'][0],
+            status=ENABLED,
+            include_master=True,
+        )['result']
 
         enabled_role_names = [r[u'role_servrole'] for r in enabled_roles]
 
@@ -337,7 +344,9 @@ class server_find(LDAPSearch):
             role_status = self.api.Command.server_role_find(
                 server_server=None,
                 role_servrole=role,
-                status=ENABLED)['result']
+                status=ENABLED,
+                include_master=True,
+            )['result']
 
             return set(
                 r[u'server_server'] for r in role_status)
@@ -474,7 +483,7 @@ class server_del(LDAPDelete):
 
         ipa_config = self.api.Command.config_show()['result']
 
-        ipa_masters = ipa_config['ipa_master_server']
+        ipa_masters = ipa_config.get('ipa_master_server', [])
 
         # skip these checks if the last master is being removed
         if len(ipa_masters) <= 1:
@@ -521,16 +530,13 @@ class server_del(LDAPDelete):
                       "leave your installation without a CA."),
                     ignore_last_of_role)
 
+            # change the renewal master if there is other master with CA
             if ca_renewal_master == hostname:
                 other_cas = [ca for ca in ca_servers if ca != hostname]
 
-                # if this is the last CA there is no other server to become
-                # renewal master
-                if not other_cas:
-                    return
-
-                self.api.Command.config_mod(
-                    ca_renewal_master_server=other_cas[0])
+                if other_cas:
+                    self.api.Command.config_mod(
+                        ca_renewal_master_server=other_cas[0])
 
         if ignore_last_of_role:
             self.add_message(
@@ -913,15 +919,7 @@ class server_conncheck(crud.PKQuery):
 
         # the user must have the Replication Administrators privilege
         privilege = u'Replication Administrators'
-        privilege_dn = self.api.Object.privilege.get_dn(privilege)
-        ldap = self.obj.backend
-        filter = ldap.make_filter({
-            'krbprincipalname': context.principal,  # pylint: disable=no-member
-            'memberof': privilege_dn},
-            rules=ldap.MATCH_ALL)
-        try:
-            ldap.find_entries(base_dn=self.api.env.basedn, filter=filter)
-        except errors.NotFound:
+        if not principal_has_privilege(self.api, context.principal, privilege):
             raise errors.ACIError(
                 info=_("not allowed to perform server connection check"))
 
@@ -945,3 +943,86 @@ class server_conncheck(crud.PKQuery):
                                  messages.ExternalCommandOutput(line=line))
 
         return result
+
+
+@register()
+class server_state(crud.PKQuery):
+    __doc__ = _("Set enabled/hidden state of a server.")
+
+    takes_options = (
+        StrEnum(
+            'state',
+            values=(u'enabled', u'hidden'),
+            label=_('State'),
+            doc=_('Server state'),
+            flags={'virtual_attribute', 'no_create', 'no_search'},
+        ),
+    )
+
+    msg_summary = _('Changed server state of "%(value)s".')
+
+    has_output = output.standard_boolean
+
+    def _check_hide_server(self, fqdn):
+        result = self.api.Command.config_show()['result']
+        err = []
+        # single value entries
+        if result.get("ca_renewal_master_server") == fqdn:
+            err.append(_("Cannot hide CA renewal master."))
+        if result.get("dnssec_key_master_server") == fqdn:
+            err.append(_("Cannot hide DNSSec key master."))
+        # multi value entries, only fail if we are the last one
+        checks = [
+            ("ca_server_server", "CA"),
+            ("dns_server_server", "DNS"),
+            ("ipa_master_server", "IPA"),
+            ("kra_server_server", "KRA"),
+        ]
+        for key, name in checks:
+            values = result.get(key, [])
+            if values == [fqdn]:  # fqdn is the only entry
+                err.append(
+                    _("Cannot hide last enabled %(name)s server.") % {
+                        'name': name
+                    }
+                )
+        if err:
+            raise errors.ValidationError(
+                name=fqdn,
+                error=' '.join(str(e) for e in err)
+            )
+
+    def execute(self, *keys, **options):
+        fqdn = keys[0]
+        if options['state'] == u'enabled':
+            to_status = ENABLED
+            from_status = HIDDEN
+        else:
+            to_status = HIDDEN
+            from_status = ENABLED
+
+        roles = self.api.Command.server_role_find(
+            server_server=fqdn,
+            status=from_status,
+            include_master=True,
+        )['result']
+        from_roles = [r[u'role_servrole'] for r in roles]
+        if not from_roles:
+            # no server role is in source status
+            raise errors.EmptyModlist
+
+        if to_status == ENABLED:
+            enable_services(fqdn)
+        else:
+            self._check_hide_server(fqdn)
+            hide_services(fqdn)
+
+        # update system roles
+        result = self.api.Command.dns_update_system_records()
+        if not result.get('value'):
+            self.add_message(messages.AutomaticDNSRecordsUpdateFailed())
+
+        return {
+            'value': fqdn,
+            'result': True,
+        }

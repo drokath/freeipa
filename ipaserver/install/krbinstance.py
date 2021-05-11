@@ -45,6 +45,7 @@ from ipaserver.install import replication
 from ipaserver.install import ldapupdate
 
 from ipaserver.install import certs
+from ipaserver.masters import find_providing_servers
 from ipaplatform.constants import constants
 from ipaplatform.tasks import tasks
 from ipaplatform.paths import paths
@@ -63,7 +64,7 @@ def get_pkinit_request_ca():
         {'cert-file': paths.KDC_CERT})
 
     if pkinit_request_id is None:
-        return
+        return None
 
     return certmonger.get_request_value(pkinit_request_id, 'ca-name')
 
@@ -77,7 +78,7 @@ def is_pkinit_enabled():
     if os.path.exists(paths.KDC_CERT):
         pkinit_request_ca = get_pkinit_request_ca()
 
-        if pkinit_request_ca != "SelfSign":
+        if pkinit_request_ca and pkinit_request_ca != "SelfSign":
             return True
 
     return False
@@ -242,7 +243,7 @@ class KrbInstance(service.Service):
         # We do not let the system start IPA components on its own,
         # Instead we reply on the IPA init script to start only enabled
         # components as found in our LDAP configuration tree
-        self.ldap_enable('KDC', self.fqdn, None, self.suffix)
+        self.ldap_configure('KDC', self.fqdn, None, self.suffix)
 
     def __start_instance(self):
         try:
@@ -332,8 +333,9 @@ class KrbInstance(service.Service):
         )
         try:
             ipautil.run(args, nolog=(self.master_password,), stdin=''.join(dialogue))
-        except ipautil.CalledProcessError:
-            print("Failed to initialize the realm container")
+        except ipautil.CalledProcessError as error:
+            logger.debug("kdb5_util failed with %s", error)
+            raise RuntimeError("Failed to initialize kerberos container")
 
     def __configure_instance(self):
         self.__template_file(paths.KRB5KDC_KDC_CONF, chmod=None)
@@ -345,7 +347,7 @@ class KrbInstance(service.Service):
         MIN_KRB5KDC_WITH_WORKERS = "1.9"
         cpus = os.sysconf('SC_NPROCESSORS_ONLN')
         workers = False
-        result = ipautil.run(['klist', '-V'],
+        result = ipautil.run([paths.KLIST, '-V'],
                              raiseonerr=False, capture_output=True)
         if result.returncode == 0:
             verstr = result.output.split()[-1]
@@ -398,13 +400,16 @@ class KrbInstance(service.Service):
     def _wait_for_replica_kdc_entry(self):
         master_dn = self.api.Object.server.get_dn(self.fqdn)
         kdc_dn = DN(('cn', 'KDC'), master_dn)
-
-        ldap_uri = 'ldap://{}'.format(self.master_fqdn)
-
+        ldap_uri = ipaldap.get_ldap_uri(self.master_fqdn)
         with ipaldap.LDAPClient(
-                ldap_uri, cacert=paths.IPA_CA_CRT) as remote_ldap:
+                ldap_uri, cacert=paths.IPA_CA_CRT, start_tls=True
+        ) as remote_ldap:
             remote_ldap.gssapi_bind()
-            replication.wait_for_entry(remote_ldap, kdc_dn, timeout=60)
+            replication.wait_for_entry(
+                remote_ldap,
+                kdc_dn,
+                timeout=api.env.replication_wait_timeout
+            )
 
     def _call_certmonger(self, certmonger_ca='IPA'):
         subject = str(DN(('cn', self.fqdn), self.subject_base))
@@ -415,10 +420,14 @@ class KrbInstance(service.Service):
             prev_helper = None
             # on the first CA-ful master without '--no-pkinit', we issue the
             # certificate by contacting Dogtag directly
+            ca_instances = find_providing_servers(
+                'CA', conn=self.api.Backend.ldap2, api=self.api)
+
             use_dogtag_submit = all(
                 [self.master_fqdn is None,
                  self.pkcs12_info is None,
-                 self.config_pkinit])
+                 self.config_pkinit,
+                 len(ca_instances) == 0])
 
             if use_dogtag_submit:
                 ca_args = [
@@ -441,7 +450,9 @@ class KrbInstance(service.Service):
                 storage='FILE',
                 profile=KDC_PROFILE,
                 post_command='renew_kdc_cert',
-                perms=(0o644, 0o600))
+                perms=(0o644, 0o600),
+                resubmit_timeout=api.env.replication_wait_timeout
+            )
         except dbus.DBusException as e:
             # if the certificate is already tracked, ignore the error
             name = e.get_dbus_name()
@@ -464,11 +475,7 @@ class KrbInstance(service.Service):
         unadvertise enabled PKINIT feature in master's KDC entry in LDAP
         """
         ldap = api.Backend.ldap2
-        dn = DN(('cn', 'KDC'),
-                ('cn', self.fqdn),
-                ('cn', 'masters'),
-                ('cn', 'ipa'),
-                ('cn', 'etc'),
+        dn = DN(('cn', 'KDC'), ('cn', self.fqdn), api.env.container_masters,
                 self.suffix)
 
         entry = ldap.get_entry(dn, ['ipaConfigString'])
@@ -489,7 +496,7 @@ class KrbInstance(service.Service):
                                           self.api.env.realm,
                                           False)
         ca_certs = [c for c, _n, t, _u in ca_certs if t is not False]
-        x509.write_certificate_list(ca_certs, paths.CACERT_PEM)
+        x509.write_certificate_list(ca_certs, paths.CACERT_PEM, mode=0o644)
 
     def issue_selfsigned_pkinit_certs(self):
         self._call_certmonger(certmonger_ca="SelfSign")
@@ -520,6 +527,8 @@ class KrbInstance(service.Service):
         certs.install_pem_from_p12(self.pkcs12_info[0],
                                    self.pkcs12_info[1],
                                    paths.KDC_CERT)
+        # The KDC cert needs to be readable by everyone
+        os.chmod(paths.KDC_CERT, 0o644)
         certs.install_key_from_p12(self.pkcs12_info[0],
                                    self.pkcs12_info[1],
                                    paths.KDC_KEY)
@@ -585,6 +594,10 @@ class KrbInstance(service.Service):
     def stop_tracking_certs(self):
         certmonger.stop_tracking(certfile=paths.KDC_CERT)
 
+    def delete_pkinit_cert(self):
+        installutils.remove_file(paths.KDC_CERT)
+        installutils.remove_file(paths.KDC_KEY)
+
     def uninstall(self):
         if self.is_configured():
             self.print_msg("Unconfiguring %s" % self.service_name)
@@ -603,15 +616,14 @@ class KrbInstance(service.Service):
             except ValueError as error:
                 logger.debug("%s", error)
 
-        # disabled by default, by ldap_enable()
+        # disabled by default, by ldap_configure()
         if enabled:
             self.enable()
 
         # stop tracking and remove certificates
         self.stop_tracking_certs()
         installutils.remove_file(paths.CACERT_PEM)
-        installutils.remove_file(paths.KDC_CERT)
-        installutils.remove_file(paths.KDC_KEY)
+        self.delete_pkinit_cert()
 
         if running:
             self.restart()

@@ -17,7 +17,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 
 import logging
 import os
@@ -72,6 +72,15 @@ def check_inst():
                   "start the installation again")
             return False
 
+    # Check that ipa-server-trust-ad package is installed,
+    # by looking for the file /usr/share/ipa/smb.conf.empty
+    if not os.path.exists(os.path.join(paths.USR_SHARE_IPA_DIR,
+                                       "smb.conf.empty")):
+        print("AD Trust requires the '%s' package" %
+              constants.IPA_ADTRUST_PACKAGE_NAME)
+        print("Please install the package and start the installation again")
+        return False
+
     #TODO: Add check for needed samba4 libraries
 
     return True
@@ -110,6 +119,24 @@ def check_netbios_name(name):
 def make_netbios_name(s):
     return ''.join([c for c in s.split('.')[0].upper() \
                     if c in ALLOWED_NETBIOS_CHARS])[:15]
+
+
+def map_Guests_to_nobody():
+    env = {'LC_ALL': 'C'}
+    args = [paths.NET, '-s', '/dev/null', 'groupmap', 'add',
+            'sid=S-1-5-32-546', 'unixgroup=nobody', 'type=builtin']
+
+    logger.debug("Map BUILTIN\\Guests to a group 'nobody'")
+    ipautil.run(args, env=env, raiseonerr=False, capture_error=True)
+
+
+def get_idmap_range(realm):
+    idrange = api.Command.idrange_show(u'{}_id_range'.format(realm))['result']
+    range_start = int(idrange['ipabaseid'][0])
+    range_size = int(idrange['ipaidrangesize'][0])
+    range_fmt = '{} - {}'.format(range_start, range_start + range_size)
+    return range_fmt
+
 
 class ADTRUSTInstance(service.Service):
 
@@ -523,6 +550,9 @@ class ADTRUSTInstance(service.Service):
             tmp_conf.flush()
             ipautil.run([paths.NET, "conf", "import", tmp_conf.name])
 
+    def __map_Guests_to_nobody(self):
+        map_Guests_to_nobody()
+
     def __setup_group_membership(self):
         # Add the CIFS and host principals to the 'adtrust agents' group
         # as 389-ds only operates with GroupOfNames, we have to use
@@ -542,13 +572,14 @@ class ADTRUSTInstance(service.Service):
         """
         Do not re-set ownership of samba keytab
         """
-        pass
 
     def clean_samba_keytab(self):
         if os.path.exists(self.keytab):
             try:
-                ipautil.run(["ipa-rmkeytab", "--principal", self.principal,
-                             "-k", self.keytab])
+                ipautil.run([
+                    paths.IPA_RMKEYTAB, "--principal", self.principal,
+                    "-k", self.keytab
+                ])
             except ipautil.CalledProcessError as e:
                 if e.returncode != 5:
                     logger.critical("Failed to remove old key for %s",
@@ -581,7 +612,7 @@ class ADTRUSTInstance(service.Service):
             self.print_msg(err_msg)
             self.print_msg("Add the following service records to your DNS " \
                            "server for DNS zone %s: " % zone)
-            system_records = IPASystemRecords(api)
+            system_records = IPASystemRecords(api, all_servers=True)
             adtrust_records = system_records.get_base_records(
                 [self.fqdn], ["AD trust controller"],
                 include_master_role=False, include_kerberos_realm=False)
@@ -736,12 +767,12 @@ class ADTRUSTInstance(service.Service):
         # Note that self.dm_password is None for ADTrustInstance because
         # we ensure to be called as root and using ldapi to use autobind
         try:
-            self.ldap_enable('ADTRUST', self.fqdn, None, self.suffix)
+            self.ldap_configure('ADTRUST', self.fqdn, None, self.suffix)
         except (ldap.ALREADY_EXISTS, errors.DuplicateEntry):
             logger.info("ADTRUST Service startup entry already exists.")
 
         try:
-            self.ldap_enable('EXTID', self.fqdn, None, self.suffix)
+            self.ldap_configure('EXTID', self.fqdn, None, self.suffix)
         except (ldap.ALREADY_EXISTS, errors.DuplicateEntry):
             logger.info("EXTID Service startup entry already exists.")
 
@@ -815,12 +846,18 @@ class ADTRUSTInstance(service.Service):
         )
         api.Backend.ldap2.add_entry(entry)
 
+    def __retrieve_local_range(self):
+        """Retrieves local IPA ID range to make sure
+        """
+        self.sub_dict['IPA_LOCAL_RANGE'] = get_idmap_range(self.realm)
+
     def create_instance(self):
         self.step("validate server hostname",
                   self.__validate_server_hostname)
         self.step("stopping smbd", self.__stop)
         self.step("creating samba domain object", \
                   self.__create_samba_domain_object)
+        self.step("retrieve local idmap range", self.__retrieve_local_range)
         self.step("creating samba config registry", self.__write_smb_registry)
         self.step("writing samba config file", self.__write_smb_conf)
         self.step("adding cifs Kerberos principal",
@@ -834,6 +871,8 @@ class ADTRUSTInstance(service.Service):
         self.step("updating Kerberos config", self.__update_krb5_conf)
         self.step("activating CLDAP plugin", self.__add_cldap_module)
         self.step("activating sidgen task", self.__add_sidgen_task)
+        self.step("map BUILTIN\\Guests to nobody group",
+                  self.__map_Guests_to_nobody)
         self.step("configuring smbd to start on boot", self.__enable)
         self.step("adding special DNS service records", \
                   self.__add_dns_service_records)

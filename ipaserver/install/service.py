@@ -17,6 +17,8 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+from __future__ import absolute_import
+
 import logging
 import sys
 import os
@@ -25,6 +27,7 @@ import socket
 import datetime
 import traceback
 import tempfile
+import warnings
 
 import six
 
@@ -35,30 +38,16 @@ from ipapython import kerberos
 from ipalib import api, errors
 from ipaplatform import services
 from ipaplatform.paths import paths
+from ipaserver.masters import (
+    CONFIGURED_SERVICE, ENABLED_SERVICE, HIDDEN_SERVICE, SERVICE_LIST
+)
+from ipaserver.servroles import HIDDEN
 
 logger = logging.getLogger(__name__)
 
 if six.PY3:
     unicode = str
 
-# The service name as stored in cn=masters,cn=ipa,cn=etc. In the tuple
-# the first value is the *nix service name, the second the start order.
-SERVICE_LIST = {
-    'KDC': ('krb5kdc', 10),
-    'KPASSWD': ('kadmin', 20),
-    'DNS': ('named', 30),
-    'HTTP': ('httpd', 40),
-    'KEYS': ('ipa-custodia', 41),
-    'NTP': ('ntpd', 45),
-    'CA': ('pki-tomcatd', 50),
-    'KRA': ('pki-tomcatd', 51),
-    'ADTRUST': ('smb', 60),
-    'EXTID': ('winbind', 70),
-    'OTPD': ('ipa-otpd', 80),
-    'DNSKeyExporter': ('ipa-ods-exporter', 90),
-    'DNSSEC': ('ods-enforcerd', 100),
-    'DNSKeySync': ('ipa-dnskeysyncd', 110),
-}
 
 def print_msg(message, output_fd=sys.stdout):
     logger.debug("%s", message)
@@ -110,32 +99,6 @@ def add_principals_to_group(admin_conn, group, member_attr, principals):
         pass
 
 
-def find_providing_server(svcname, conn, host_name=None, api=api):
-    """
-    :param svcname: The service to find
-    :param conn: a connection to the LDAP server
-    :param host_name: the preferred server
-    :return: the selected host name
-
-    Find a server that is a CA.
-    """
-    dn = DN(('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'), api.env.basedn)
-    query_filter = conn.make_filter({'objectClass': 'ipaConfigObject',
-                                     'ipaConfigString': 'enabledService',
-                                     'cn': svcname}, rules='&')
-    try:
-        entries, _trunc = conn.find_entries(filter=query_filter, base_dn=dn)
-    except errors.NotFound:
-        return None
-    if len(entries):
-        if host_name is not None:
-            for entry in entries:
-                if entry.dn[1].value == host_name:
-                    return host_name
-        # if the preferred is not found, return the first in the list
-        return entries[0].dn[1].value
-    return None
-
 
 def case_insensitive_attr_has_value(attr, value):
     """
@@ -172,8 +135,7 @@ def set_service_entry_config(name, fqdn, config_values,
     assert isinstance(ldap_suffix, DN)
 
     entry_name = DN(
-        ('cn', name), ('cn', fqdn), ('cn', 'masters'),
-        ('cn', 'ipa'), ('cn', 'etc'), ldap_suffix)
+        ('cn', name), ('cn', fqdn), api.env.container_masters, ldap_suffix)
 
     # enable disabled service
     try:
@@ -218,6 +180,105 @@ def set_service_entry_config(name, fqdn, config_values,
         raise e
 
 
+def enable_services(fqdn):
+    """Change all services to enabled state
+
+    Server.ldap_configure() only marks a service as configured. Services
+    are enabled at the very end of installation.
+
+    Note: DNS records must be updated with dns_update_system_records, too.
+
+    :param fqdn: hostname of server
+    """
+    _set_services_state(fqdn, ENABLED_SERVICE)
+
+
+def hide_services(fqdn):
+    """Change all services to hidden state
+
+    Note: DNS records must be updated with dns_update_system_records, too.
+
+    :param fqdn: hostname of server
+    """
+    _set_services_state(fqdn, HIDDEN_SERVICE)
+
+
+def sync_services_state(fqdn):
+    """Synchronize services state from IPA master role state
+
+    Hide all services if the IPA master role state is in hidden state.
+    Otherwise enable all services.
+
+    :param fqdn: hostname of server
+    """
+    result = api.Command.server_role_find(
+        server_server=fqdn,
+        role_servrole=u'IPA master',
+        status=HIDDEN
+    )
+    if result['count']:
+        # one hidden server role
+        hide_services(fqdn)
+    else:
+        # IPA master is either enabled or configured, enable all
+        enable_services(fqdn)
+
+
+def _set_services_state(fqdn, dest_state):
+    """Change all services of a host
+
+    :param fqdn: hostname of server
+    :param dest_state: destination state
+    """
+    ldap2 = api.Backend.ldap2
+    search_base = DN(('cn', fqdn), api.env.container_masters, api.env.basedn)
+
+    source_states = {
+        CONFIGURED_SERVICE.lower(),
+        ENABLED_SERVICE.lower(),
+        HIDDEN_SERVICE.lower()
+    }
+    source_states.remove(dest_state.lower())
+
+    search_filter = ldap2.combine_filters(
+        [
+            ldap2.make_filter({'objectClass': 'ipaConfigObject'}),
+            ldap2.make_filter(
+                {'ipaConfigString': list(source_states)},
+                rules=ldap2.MATCH_ANY
+            ),
+        ],
+        rules=ldap2.MATCH_ALL
+    )
+
+    entries = ldap2.get_entries(
+        search_base,
+        filter=search_filter,
+        scope=api.Backend.ldap2.SCOPE_ONELEVEL,
+        attrs_list=['cn', 'ipaConfigString']
+    )
+    for entry in entries:
+        name = entry['cn']
+        cfgstrings = entry.setdefault('ipaConfigString', [])
+        for value in list(cfgstrings):
+            if value.lower() in source_states:
+                cfgstrings.remove(value)
+        if not case_insensitive_attr_has_value(cfgstrings, dest_state):
+            cfgstrings.append(dest_state)
+
+        try:
+            ldap2.update_entry(entry)
+        except errors.EmptyModlist:
+            logger.debug("Nothing to do for service %s", name)
+        except Exception:
+            logger.exception("failed to set service %s config values", name)
+            raise
+        else:
+            logger.debug(
+                "Set service %s for %s to %s", name, fqdn, dest_state
+            )
+
+
 class Service(object):
     def __init__(self, service_name, service_desc=None, sstore=None,
                  fstore=None, api=api, realm_name=None,
@@ -256,7 +317,7 @@ class Service(object):
     def principal(self):
         if any(attr is None for attr in (self.realm, self.fqdn,
                                          self.service_prefix)):
-            return
+            return None
 
         return unicode(
             kerberos.Principal(
@@ -524,9 +585,37 @@ class Service(object):
         self.steps = []
 
     def ldap_enable(self, name, fqdn, dm_password=None, ldap_suffix='',
-                    config=[]):
+                    config=()):
+        """Legacy function, all services should use ldap_configure()
+        """
+        warnings.warn(
+            "ldap_enable is deprecated, use ldap_configure instead.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        self._ldap_enable(ENABLED_SERVICE, name, fqdn, ldap_suffix, config)
+
+    def ldap_configure(self, name, fqdn, dm_password=None, ldap_suffix='',
+                       config=()):
+        """Create or modify service entry in cn=masters,cn=ipa,cn=etc
+
+        Contrary to ldap_enable(), the method only sets
+        ipaConfigString=configuredService. ipaConfigString=enabledService
+        is set at the very end of the installation process, to ensure that
+        other machines see this master/replica after it is fully installed.
+
+        To switch all configured services to enabled, use::
+
+            ipaserver.install.service.enable_services(api.env.host)
+            api.Command.dns_update_system_records()
+        """
+        self._ldap_enable(
+            CONFIGURED_SERVICE, name, fqdn, ldap_suffix, config
+        )
+
+    def _ldap_enable(self, value, name, fqdn, ldap_suffix, config):
         extra_config_opts = [
-            ' '.join([u'startOrder', unicode(SERVICE_LIST[name][1])])
+            u'startOrder {}'.format(SERVICE_LIST[name].startorder),
         ]
         extra_config_opts.extend(config)
 
@@ -535,16 +624,16 @@ class Service(object):
         set_service_entry_config(
             name,
             fqdn,
-            [u'enabledService'],
+            [value],
             ldap_suffix=ldap_suffix,
             post_add_config=extra_config_opts)
 
     def ldap_disable(self, name, fqdn, ldap_suffix):
         assert isinstance(ldap_suffix, DN)
 
-        entry_dn = DN(('cn', name), ('cn', fqdn), ('cn', 'masters'),
-                        ('cn', 'ipa'), ('cn', 'etc'), ldap_suffix)
-        search_kw = {'ipaConfigString': u'enabledService'}
+        entry_dn = DN(('cn', name), ('cn', fqdn), api.env.container_masters,
+                      ldap_suffix)
+        search_kw = {'ipaConfigString': ENABLED_SERVICE}
         filter = api.Backend.ldap2.make_filter(search_kw)
         try:
             entries, _truncated = api.Backend.ldap2.find_entries(
@@ -561,7 +650,7 @@ class Service(object):
 
         # case insensitive
         for value in entry.get('ipaConfigString', []):
-            if value.lower() == u'enabledservice':
+            if value.lower() == ENABLED_SERVICE:
                 entry['ipaConfigString'].remove(value)
                 break
 
@@ -576,8 +665,8 @@ class Service(object):
         logger.debug("service %s startup entry disabled", name)
 
     def ldap_remove_service_container(self, name, fqdn, ldap_suffix):
-        entry_dn = DN(('cn', name), ('cn', fqdn), ('cn', 'masters'),
-                        ('cn', 'ipa'), ('cn', 'etc'), ldap_suffix)
+        entry_dn = DN(('cn', name), ('cn', fqdn),
+                      self.api.env.container_masters, ldap_suffix)
         try:
             api.Backend.ldap2.delete_entry(entry_dn)
         except errors.NotFound:
@@ -674,7 +763,7 @@ class SimpleServiceInstance(Service):
         if self.gensvc_name == None:
             self.enable()
         else:
-            self.ldap_enable(self.gensvc_name, self.fqdn, None, self.suffix)
+            self.ldap_configure(self.gensvc_name, self.fqdn, None, self.suffix)
 
     def is_installed(self):
         return self.service.is_installed()

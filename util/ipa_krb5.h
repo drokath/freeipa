@@ -3,6 +3,7 @@
 #include <lber.h>
 #include <krb5/krb5.h>
 #include <kdb.h>
+#include <syslog.h>
 
 struct krb_key_salt {
     krb5_enctype enctype;
@@ -28,6 +29,9 @@ struct keys_container {
 #define KEYTAB_SET_OID "2.16.840.1.113730.3.8.10.1"
 #define KEYTAB_RET_OID "2.16.840.1.113730.3.8.10.2"
 #define KEYTAB_GET_OID "2.16.840.1.113730.3.8.10.5"
+
+#define IPAPWD_PASSWORD_MAX_LEN 1000
+extern const char *ipapwd_password_max_len_errmsg;
 
 int krb5_klog_syslog(int, const char *, ...);
 

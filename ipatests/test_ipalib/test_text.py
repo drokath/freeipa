@@ -197,7 +197,7 @@ class test_Gettext(object):
 
     def test_mod(self):
         inst = self.klass('hello %(adj)s nurse', 'foo', 'bar')
-        assert inst % dict(adj='naughty', stuff='junk') == 'hello naughty nurse'
+        assert inst % dict(adj='tall', stuff='junk') == 'hello tall nurse'
 
     def test_eq(self):
         inst1 = self.klass('what up?', 'foo', 'bar')
@@ -205,6 +205,7 @@ class test_Gettext(object):
         inst3 = self.klass('Hello world', 'foo', 'bar')
         inst4 = self.klass('what up?', 'foo', 'baz')
 
+        # pylint: disable=comparison-with-itself
         assert (inst1 == inst1) is True
         assert (inst1 == inst2) is True
         assert (inst1 == inst3) is False
@@ -268,6 +269,7 @@ class test_NGettext(object):
         inst3 = self.klass(singular, '%(count)d thingies', 'foo', 'bar')
         inst4 = self.klass(singular, plural, 'foo', 'baz')
 
+        # pylint: disable=comparison-with-itself
         assert (inst1 == inst1) is True
         assert (inst1 == inst2) is True
         assert (inst1 == inst3) is False

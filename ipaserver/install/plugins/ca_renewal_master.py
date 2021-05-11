@@ -17,6 +17,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from __future__ import absolute_import
+
 import logging
 
 from ipaserver.install import installutils, cainstance
@@ -44,8 +46,7 @@ class update_ca_renewal_master(Updater):
             return False, []
 
         ldap = self.api.Backend.ldap2
-        base_dn = DN(('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'),
-                     self.api.env.basedn)
+        base_dn = DN(self.api.env.container_masters, self.api.env.basedn)
         dn = DN(('cn', 'CA'), ('cn', self.api.env.host), base_dn)
         filter = '(&(cn=CA)(ipaConfigString=caRenewalMaster))'
         try:

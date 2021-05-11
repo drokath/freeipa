@@ -18,6 +18,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import dbus
+import dbus.mainloop.glib
 import logging
 
 import six
@@ -26,6 +28,7 @@ from ipalib.messages import (
     add_message,
     BrokenTrust)
 from ipalib.plugable import Registry
+from ipalib.request import context
 from .baseldap import (
     pkey_to_value,
     entry_to_dict,
@@ -42,6 +45,7 @@ from ipapython.ipautil import realm_to_suffix
 from ipalib import api, Str, StrEnum, Password, Bool, _, ngettext, Int, Flag
 from ipalib import Command
 from ipalib import errors
+from ipalib import messages
 from ipalib import output
 from ldap import SCOPE_SUBTREE
 from time import sleep
@@ -52,6 +56,7 @@ from ipaserver.dcerpc_common import (TRUST_ONEWAY,
                                      trust_type_string,
                                      trust_direction_string,
                                      trust_status_string)
+from ipaserver.plugins.privilege import principal_has_privilege
 
 if six.PY3:
     unicode = str
@@ -71,8 +76,6 @@ except Exception as e:
 if api.env.in_server and api.env.context in ['lite', 'server']:
     try:
         import ipaserver.dcerpc
-        import dbus
-        import dbus.mainloop.glib
         _bindings_installed = True
     except ImportError:
         _bindings_installed = False
@@ -363,8 +366,7 @@ def add_range(myapi, trustinstance, range_name, dom_sid, *keys, **options):
             if info_list:
                 info = info_list[0]
                 break
-            else:
-                sleep(2)
+            sleep(2)
 
         required_msSFU_attrs = ['msSFU30MaxUidNumber', 'msSFU30OrderNumber']
 
@@ -418,9 +420,19 @@ def add_range(myapi, trustinstance, range_name, dom_sid, *keys, **options):
     return range_type, range_size, base_id
 
 
-def fetch_trusted_domains_over_dbus(myapi, forest_name):
+def fetch_trusted_domains_over_dbus(myapi, *keys, **options):
     if not _bindings_installed:
         return
+
+    forest_name = keys[0]
+    method_options = []
+    if options.get('realm_server', None):
+        method_options.extend(['--server', options['realm_server']])
+    if options.get('realm_admin', None):
+        method_options.extend(['--admin', options['realm_admin']])
+    if options.get('realm_passwd', None):
+        method_options.extend(['--password', options['realm_passwd']])
+
     # Calling oddjobd-activated service via DBus has some quirks:
     # - Oddjobd registers multiple canonical names on the same address
     # - python-dbus only follows name owner changes when mainloop is in use
@@ -436,15 +448,27 @@ def fetch_trusted_domains_over_dbus(myapi, forest_name):
         fetch_domains_method = intf.get_dbus_method(
                 'fetch_domains',
                 dbus_interface=DBUS_IFACE_TRUST)
-        (_ret, _stdout, _stderr) = fetch_domains_method(forest_name)
+        # Oddjobd D-BUS method definition only accepts fixed number
+        # of arguments on the command line. Thus, we need to pass
+        # remaining ones as ''. There are 30 slots to allow for extension
+        # and the number comes from the 'arguments' definition in
+        # install/oddjob/etc/oddjobd.conf.d/oddjobd-ipa-trust.conf
+        method_arguments = [forest_name]
+        method_arguments.extend(method_options)
+        method_arguments.extend([''] * (30 - len(method_arguments)))
+        (_ret, _stdout, _stderr) = fetch_domains_method(*method_arguments)
     except dbus.DBusException as e:
         logger.error('Failed to call %s.fetch_domains helper.'
                      'DBus exception is %s.', DBUS_IFACE_TRUST, str(e))
-        if _ret != 0:
-            logger.error('Helper was called for forest %s, return code is %d',
-                         forest_name, _ret)
-            logger.error('Standard output from the helper:\n%s---\n', _stdout)
-            logger.error('Error output from the helper:\n%s--\n', _stderr)
+        _ret = 2
+        _stdout = '<not available>'
+        _stderr = '<not available>'
+
+    if _ret != 0:
+        logger.error('Helper fetch_domains was called for forest %s, '
+                     'return code is %d', forest_name, _ret)
+        logger.error('Standard output from the helper:\n%s---\n', _stdout)
+        logger.error('Error output from the helper:\n%s--\n', _stderr)
         raise errors.ServerCommandError(
             server=myapi.env.host,
             error=_('Fetching domains from trusted forest failed. '
@@ -657,48 +681,52 @@ ipa idrange-del before retrying the command with the desired range type.
         Str('realm_admin?',
             cli_name='admin',
             label=_("Active Directory domain administrator"),
-        ),
+            ),
         Password('realm_passwd?',
-            cli_name='password',
-            label=_("Active Directory domain administrator's password"),
-            confirm=False,
-        ),
+                 cli_name='password',
+                 label=_("Active Directory domain administrator's password"),
+                 confirm=False,
+                 ),
         Str('realm_server?',
             cli_name='server',
-            label=_('Domain controller for the Active Directory domain (optional)'),
-        ),
+            label=_('Domain controller for the Active Directory domain '
+                    '(optional)'),
+            ),
         Password('trust_secret?',
-            cli_name='trust_secret',
-            label=_('Shared secret for the trust'),
-            confirm=False,
-        ),
+                 cli_name='trust_secret',
+                 label=_('Shared secret for the trust'),
+                 confirm=False,
+                 ),
         Int('base_id?',
             cli_name='base_id',
-            label=_('First Posix ID of the range reserved for the trusted domain'),
-        ),
+            label=_('First Posix ID of the range reserved for the '
+                    'trusted domain'),
+            ),
         Int('range_size?',
             cli_name='range_size',
-            label=_('Size of the ID range reserved for the trusted domain'),
-        ),
+            label=_('Size of the ID range reserved for the trusted domain')
+            ),
         StrEnum('range_type?',
-            label=_('Range type'),
-            cli_name='range_type',
-            doc=(_('Type of trusted domain ID range, one of {vals}'
-                 .format(vals=', '.join(range_types.keys())))),
-            values=tuple(range_types.keys()),
-        ),
+                label=_('Range type'),
+                cli_name='range_type',
+                doc=(_('Type of trusted domain ID range, one of {vals}'
+                     .format(vals=', '.join(sorted(range_types))))),
+                values=sorted(range_types),
+                ),
         Bool('bidirectional?',
              label=_('Two-way trust'),
              cli_name='two_way',
-             doc=(_('Establish bi-directional trust. By default trust is inbound one-way only.')),
+             doc=(_('Establish bi-directional trust. By default trust is '
+                    'inbound one-way only.')),
              default=False,
-        ),
+             ),
         Bool('external?',
              label=_('External trust'),
              cli_name='external',
-             doc=(_('Establish external trust to a domain in another forest. The trust is not transitive beyond the domain.')),
+             doc=_('Establish external trust to a domain in another forest. '
+                   'The trust is not transitive beyond the domain.'),
              default=False,
-        ),
+             ),
     )
 
     msg_summary = _('Added Active Directory trust for realm "%(value)s"')
@@ -779,7 +807,13 @@ ipa idrange-del before retrying the command with the desired range type.
                 # object credentials to authenticate to AD with Kerberos,
                 # run DCE RPC calls to do discovery and will call
                 # add_new_domains_from_trust() on its own.
-                fetch_trusted_domains_over_dbus(self.api, result['value'])
+                # We only pass through the realm_server option because we need
+                # to reach the specified Active Directory domain controller
+                # No need to pass through admin credentials as we have TDO
+                # credentials at this point already
+                fetch_trusted_domains_over_dbus(self.api, result['value'],
+                                                realm_server=options.get(
+                                                    'realm_server', None))
 
         # Format the output into human-readable values unless `--raw` is given
         self._format_trust_attrs(result, **options)
@@ -1756,10 +1790,20 @@ class trust_fetch_domains(LDAPRetrieve):
 
     has_output = output.standard_list_of_entries
     takes_options = LDAPRetrieve.takes_options + (
+        Str('realm_admin?',
+            cli_name='admin',
+            label=_("Active Directory domain administrator"),
+            ),
+        Password('realm_passwd?',
+                 cli_name='password',
+                 label=_("Active Directory domain administrator's password"),
+                 confirm=False,
+                 ),
         Str('realm_server?',
             cli_name='server',
-            label=_('Domain controller for the Active Directory domain (optional)'),
-        ),
+            label=_('Domain controller for the Active Directory domain '
+                    '(optional)'),
+            ),
     )
 
     def execute(self, *keys, **options):
@@ -1780,10 +1824,75 @@ class trust_fetch_domains(LDAPRetrieve):
         # With privilege separation we also cannot authenticate as
         # HTTP/ principal because we have no access to its key material.
         # Thus, we'll use DBus call out to oddjobd helper in all cases
-        fetch_trusted_domains_over_dbus(self.api, keys[0])
+        fetch_trusted_domains_over_dbus(self.api, *keys, **options)
         result['summary'] = unicode(_('List of trust domains successfully '
                                       'refreshed. Use trustdomain-find '
                                       'command to list them.'))
+        return result
+
+
+@register()
+class trust_enable_agent(Command):
+    __doc__ = _("Configure this server as a trust agent.")
+
+    NO_CLI = True
+
+    has_output = output.standard_value
+    takes_args = (
+        Str(
+            'remote_cn',
+            cli_name='remote_name',
+            label=_('Remote server name'),
+            doc=_('Remote IPA server hostname'),
+        ),
+    )
+
+    takes_options = (
+        Flag('enable_compat',
+             doc=_('Enable support for trusted domains for old clients'),
+             default=False),
+    )
+
+    def execute(self, *keys, **options):
+        # the server must be the local host
+        # This check is needed because the forward method may failover
+        # to a master different from the one specified
+        if keys[0] != api.env.host:
+            raise errors.ValidationError(
+                name='cn', error=_("must be \"%s\"") % api.env.host)
+
+        # the user must have the Replication Administrators privilege
+        privilege = u'Replication Administrators'
+        if not principal_has_privilege(self.api, context.principal, privilege):
+            raise errors.ACIError(
+                info=_("not allowed to remotely add agent"))
+
+        # Trust must be configured
+
+        if options[u'enable_compat']:
+            method_arguments = "--enable-compat"
+        else:
+            method_arguments = ""
+
+        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+
+        bus = dbus.SystemBus()
+        obj = bus.get_object('org.freeipa.server', '/',
+                             follow_name_owner_changes=True)
+        server = dbus.Interface(obj, 'org.freeipa.server')
+
+        ret, stdout, stderr = server.trust_enable_agent(method_arguments)
+
+        result = dict(
+            result=(ret == 0),
+            value=keys[0],
+        )
+
+        for line in stdout.splitlines() + stderr.splitlines():
+            messages.add_message(options['version'],
+                                 result,
+                                 messages.ExternalCommandOutput(line=line))
+
         return result
 
 

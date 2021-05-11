@@ -1,6 +1,7 @@
 #
 # Copyright (C) 2016  FreeIPA Contributors see COPYING for license
 #
+import base64
 
 from ipaclient.frontend import MethodOverride
 from ipalib import errors, util, x509, Str
@@ -32,16 +33,24 @@ class WithCertOutArgs(MethodOverride):
                                              error=str(e))
 
         result = super(WithCertOutArgs, self).forward(*keys, **options)
+
         if filename:
+            # if result certificate / certificate_chain not present in result,
+            # it means Dogtag did not provide it (probably due to LWCA key
+            # replication lag or failure.  The server transmits a warning
+            # message in this case, which the client automatically prints.
+            # So in this section we just ignore it and move on.
+            certs = None
             if options.get('chain', False):
-                certs = (x509.load_der_x509_certificate(c)
-                         for c in result['result']['certificate_chain'])
+                if 'certificate_chain' in result['result']:
+                    certs = result['result']['certificate_chain']
             else:
-                certs = [
-                    x509.load_der_x509_certificate(
-                        result['result']['certificate'])
-                ]
-            x509.write_certificate_list(certs, filename)
+                if 'certificate' in result['result']:
+                    certs = [base64.b64decode(result['result']['certificate'])]
+            if certs:
+                x509.write_certificate_list(
+                    (x509.load_der_x509_certificate(cert) for cert in certs),
+                    filename)
 
         return result
 

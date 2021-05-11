@@ -19,19 +19,30 @@
 
 """Common tasks for FreeIPA integration tests"""
 
+from __future__ import absolute_import
+
 import logging
 import os
 import textwrap
 import re
 import collections
 import itertools
+import shutil
 import tempfile
 import time
+from pipes import quote
+from six.moves import configparser
+from contextlib import contextmanager
+from pkg_resources import parse_version
 
 import dns
 from ldif import LDIFWriter
-from SSSDConfig import SSSDConfig
+
 from six import StringIO
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.backends import default_backend
+
 
 from ipapython import ipautil
 from ipaplatform.paths import paths
@@ -42,6 +53,7 @@ from ipalib.util import get_reverse_zone_default, verify_host_resolvable
 from ipalib.constants import (
     DEFAULT_CONFIG, DOMAIN_SUFFIX_NAME, DOMAIN_LEVEL_0)
 
+from .create_external_ca import ExternalCA
 from .env_config import env_to_script
 from .host import Host
 
@@ -338,10 +350,25 @@ def master_authoritative_for_client_domain(master, client):
                                 raiseonerr=False)
     return result.returncode == 0
 
+
+def _config_replica_resolvconf_with_master_data(master, replica):
+    """
+    Configure replica /etc/resolv.conf to use master as DNS server
+    """
+    content = ('search {domain}\nnameserver {master_ip}'
+               .format(domain=master.domain.name, master_ip=master.ip))
+    replica.put_file_contents(paths.RESOLV_CONF, content)
+
+
 def replica_prepare(master, replica, extra_args=(),
                     raiseonerr=True, stdin_text=None):
     fix_apache_semaphores(replica)
     prepare_reverse_zone(master, replica.ip)
+
+    # in domain level 0 there is no autodiscovery, so it's necessary to
+    # change /etc/resolv.conf to find master DNS server
+    _config_replica_resolvconf_with_master_data(master, replica)
+
     args = ['ipa-replica-prepare',
             '-p', replica.config.dirman_password,
             replica.hostname]
@@ -361,7 +388,7 @@ def replica_prepare(master, replica, extra_args=(),
 def install_replica(master, replica, setup_ca=True, setup_dns=False,
                     setup_kra=False, setup_adtrust=False, extra_args=(),
                     domain_level=None, unattended=True, stdin_text=None,
-                    raiseonerr=True):
+                    raiseonerr=True, promote=True):
     if domain_level is None:
         domain_level = domainlevel(master)
     apply_common_fixes(replica)
@@ -370,8 +397,17 @@ def install_replica(master, replica, setup_ca=True, setup_dns=False,
     # Otherwise ipa-client-install would not create a PTR
     # and replica installation would fail
     args = ['ipa-replica-install',
-            '-p', replica.config.dirman_password,
             '-w', replica.config.admin_password]
+
+    if promote:
+        # install client in replica first then promote it to be a replica
+        args.extend(['-p', replica.config.dirman_password])
+        install_client(master, replica)
+    else:
+        # provide authorize user and server to install against
+        args.extend(['--principal', replica.config.admin_name,
+                     '--server', master.hostname])
+
     if unattended:
         args.append('-U')
     if setup_ca:
@@ -400,10 +436,9 @@ def install_replica(master, replica, setup_ca=True, setup_dns=False,
         replica_filename = get_replica_filename(replica)
         args.append(replica_filename)
     else:
-        # install client on a replica machine and then promote it to replica
-        install_client(master, replica)
         fix_apache_semaphores(replica)
-        args.extend(['-r', replica.domain.realm])
+        args.extend(['-r', replica.domain.realm,
+                     '--domain', replica.domain.name])
 
     result = replica.run_command(args, raiseonerr=raiseonerr,
                                  stdin_text=stdin_text)
@@ -414,7 +449,8 @@ def install_replica(master, replica, setup_ca=True, setup_dns=False,
     return result
 
 
-def install_client(master, client, extra_args=()):
+def install_client(master, client, extra_args=(),
+                   user=None, password=None):
     client.collect_log(paths.IPACLIENT_INSTALL_LOG)
 
     apply_common_fixes(client)
@@ -426,12 +462,16 @@ def install_client(master, client, extra_args=()):
     if not error:
         master.run_command(["ipa", "dnszone-mod", zone,
                             "--dynamic-update=TRUE"])
+    if user is None:
+        user = client.config.admin_name
+    if password is None:
+        password = client.config.admin_password
 
     client.run_command(['ipa-client-install', '-U',
                         '--domain', client.domain.name,
                         '--realm', client.domain.realm,
-                        '-p', client.config.admin_name,
-                        '-w', client.config.admin_password,
+                        '-p', user,
+                        '-w', password,
                         '--server', master.hostname]
                        + list(extra_args))
 
@@ -474,16 +514,103 @@ def install_adtrust(host):
     run_repeatedly(host, dig_command, test=dig_test)
 
 
-def configure_dns_for_trust(master, ad):
-    """
-    This method is intentionally left empty. Originally it served for DNS
-    configuration on IPA master according to the relationship of the IPA's
-    and AD's domains.
-    """
-    pass
+def disable_dnssec_validation(host):
+    backup_file(host, paths.NAMED_CONF)
+    named_conf = host.get_file_contents(paths.NAMED_CONF)
+    named_conf = re.sub(br'dnssec-validation\s*yes;', b'dnssec-validation no;',
+                        named_conf)
+    host.put_file_contents(paths.NAMED_CONF, named_conf)
+    restart_named(host)
 
 
-def establish_trust_with_ad(master, ad_domain, extra_args=()):
+def restore_dnssec_validation(host):
+    restore_files(host)
+    restart_named(host)
+
+
+def is_subdomain(subdomain, domain):
+    subdomain_unpacked = subdomain.split('.')
+    domain_unpacked = domain.split('.')
+
+    subdomain_unpacked.reverse()
+    domain_unpacked.reverse()
+
+    subdomain = False
+
+    if len(subdomain_unpacked) > len(domain_unpacked):
+        subdomain = True
+
+        for subdomain_segment, domain_segment in zip(subdomain_unpacked,
+                                                     domain_unpacked):
+            subdomain = subdomain and subdomain_segment == domain_segment
+
+    return subdomain
+
+
+def configure_dns_for_trust(master, *ad_hosts):
+    """
+    This configures DNS on IPA master according to the relationship of the
+    IPA's and AD's domains.
+    """
+
+    kinit_admin(master)
+    dnssec_disabled = False
+    for ad in ad_hosts:
+        if is_subdomain(ad.domain.name, master.domain.name):
+            master.run_command(['ipa', 'dnsrecord-add', master.domain.name,
+                                '%s.%s' % (ad.shortname, ad.netbios),
+                                '--a-ip-address', ad.ip])
+
+            master.run_command(['ipa', 'dnsrecord-add', master.domain.name,
+                                ad.netbios,
+                                '--ns-hostname',
+                                '%s.%s' % (ad.shortname, ad.netbios)])
+
+            master.run_command(['ipa', 'dnszone-mod', master.domain.name,
+                                '--allow-transfer', ad.ip])
+        else:
+            if not dnssec_disabled:
+                disable_dnssec_validation(master)
+                dnssec_disabled = True
+            master.run_command(['ipa', 'dnsforwardzone-add', ad.domain.name,
+                                '--forwarder', ad.ip,
+                                '--forward-policy', 'only',
+                                ])
+
+
+def unconfigure_dns_for_trust(master, *ad_hosts):
+    """
+    This undoes changes made by configure_dns_for_trust
+    """
+    kinit_admin(master)
+    dnssec_needs_restore = False
+    for ad in ad_hosts:
+        if is_subdomain(ad.domain.name, master.domain.name):
+            master.run_command(['ipa', 'dnsrecord-del', master.domain.name,
+                                '%s.%s' % (ad.shortname, ad.netbios),
+                                '--a-rec', ad.ip])
+            master.run_command(['ipa', 'dnsrecord-del', master.domain.name,
+                                ad.netbios,
+                                '--ns-rec',
+                                '%s.%s' % (ad.shortname, ad.netbios)])
+        else:
+            master.run_command(['ipa', 'dnsforwardzone-del', ad.domain.name])
+            dnssec_needs_restore = True
+    if dnssec_needs_restore:
+        restore_dnssec_validation(master)
+
+
+def configure_windows_dns_for_trust(ad, master):
+    ad.run_command(['dnscmd', '/zoneadd', master.domain.name,
+                    '/Forwarder', master.ip])
+
+
+def unconfigure_windows_dns_for_trust(ad, master):
+    ad.run_command(['dnscmd', '/zonedelete', master.domain.name, '/f'])
+
+
+def establish_trust_with_ad(master, ad_domain, extra_args=(),
+                            shared_secret=None):
     """
     Establishes trust with Active Directory. Trust type is detected depending
     on the presence of SfU (Services for Unix) support on the AD.
@@ -493,6 +620,7 @@ def establish_trust_with_ad(master, ad_domain, extra_args=()):
     """
 
     # Force KDC to reload MS-PAC info by trying to get TGT for HTTP
+    extra_args = list(extra_args)
     master.run_command(['kinit', '-kt', paths.HTTP_KEYTAB,
                         'HTTP/%s' % master.hostname])
     master.run_command(['systemctl', 'restart', 'krb5kdc.service'])
@@ -502,12 +630,15 @@ def establish_trust_with_ad(master, ad_domain, extra_args=()):
     master.run_command(['klist'])
     master.run_command(['smbcontrol', 'all', 'debug', '100'])
 
-    run_repeatedly(master,
-                   ['ipa', 'trust-add',
-                    '--type', 'ad', ad_domain,
-                    '--admin', 'Administrator',
-                    '--password'] + list(extra_args),
-                   stdin_text=master.config.ad_admin_password)
+    if shared_secret:
+        extra_args += ['--trust-secret']
+        stdin_text = shared_secret
+    else:
+        extra_args += ['--admin', 'Administrator', '--password']
+        stdin_text = master.config.ad_admin_password
+    run_repeatedly(
+        master, ['ipa', 'trust-add', '--type', 'ad', ad_domain] + extra_args,
+        stdin_text=stdin_text)
     master.run_command(['smbcontrol', 'all', 'debug', '1'])
     clear_sssd_cache(master)
     master.run_command(['systemctl', 'restart', 'krb5kdc.service'])
@@ -587,19 +718,74 @@ def setup_sssd_debugging(host):
     clear_sssd_cache(host)
 
 
-def modify_sssd_conf(host, domain, mod_dict, provider='ipa',
-                     provider_subtype=None):
-    """
-    modify options in a single domain section of host's sssd.conf
-    :param host: multihost.Host object
-    :param domain: domain section name to modify
-    :param mod_dict: dictionary of options which will be passed to
-        SSSDDomain.set_option(). To remove an option specify its value as
-        None
-    :param provider: provider backend to set. Defaults to ipa
-    :param provider_subtype: backend subtype (e.g. id or sudo), will be added
-        to the domain config if not present
-    """
+@contextmanager
+def remote_sssd_config(host):
+    """Context manager for editing sssd config file on a remote host.
+
+    It provides SimpleSSSDConfig object which is automatically serialized and
+    uploaded to remote host upon exit from the context.
+
+    If exception is raised inside the context then the ini file is NOT updated
+    on remote host.
+
+    SimpleSSSDConfig is a SSSDConfig descendant with added helper methods
+    for modifying options: edit_domain and edit_service.
+
+
+    Example:
+
+        with remote_sssd_config(master) as sssd_conf:
+            # use helper methods
+            # add/replace option
+            sssd_conf.edit_domain(master.domain, 'filter_users', 'root')
+            # add/replace provider option
+            sssd_conf.edit_domain(master.domain, 'sudo_provider', 'ipa')
+            # delete option
+            sssd_conf.edit_service('pam', 'pam_verbosity', None)
+
+            # use original methods of SSSDConfig
+            domain = sssd_conf.get_domain(master.domain.name)
+            domain.set_name('example.test')
+            self.save_domain(domain)
+        """
+
+    from SSSDConfig import SSSDConfig
+
+    class SimpleSSSDConfig(SSSDConfig):
+        def edit_domain(self, domain_or_name, option, value):
+            """Add/replace/delete option in a domain section.
+
+            :param domain_or_name: Domain object or domain name
+            :param option: option name
+            :param value: value to assign to option. If None, option will be
+                deleted
+            """
+            if hasattr(domain_or_name, 'name'):
+                domain_name = domain_or_name.name
+            else:
+                domain_name = domain_or_name
+            domain = self.get_domain(domain_name)
+            if value is None:
+                domain.remove_option(option)
+            else:
+                domain.set_option(option, value)
+            self.save_domain(domain)
+
+        def edit_service(self, service_name, option, value):
+            """Add/replace/delete option in a service section.
+
+            :param service_name: a string
+            :param option: option name
+            :param value: value to assign to option. If None, option will be
+                deleted
+            """
+            service = self.get_service(service_name)
+            if value is None:
+                service.remove_option(option)
+            else:
+                service.set_option(option, value)
+            self.save_service(service)
+
     fd, temp_config_file = tempfile.mkstemp()
     os.close(fd)
     try:
@@ -608,23 +794,40 @@ def modify_sssd_conf(host, domain, mod_dict, provider='ipa',
         with open(temp_config_file, 'wb') as f:
             f.write(current_config)
 
-        sssd_config = SSSDConfig()
+        # In order to use SSSDConfig() locally we need to import the schema
+        # Create a tar file with /usr/share/sssd.api.conf and
+        # /usr/share/sssd/sssd.api.d
+        tmpname = create_temp_file(host)
+        host.run_command(
+            ['tar', 'cJvf', tmpname,
+             'sssd.api.conf',
+             'sssd.api.d'],
+            log_stdout=False, cwd="/usr/share/sssd")
+        # fetch tar file
+        tar_dir = tempfile.mkdtemp()
+        tarname = os.path.join(tar_dir, "sssd_schema.tar.xz")
+        with open(tarname, 'wb') as f:
+            f.write(host.get_file_contents(tmpname))
+        # delete from remote
+        host.run_command(['rm', '-f', tmpname])
+        # Unpack on the local side
+        ipautil.run([paths.TAR, 'xJvf', tarname], cwd=tar_dir)
+        os.unlink(tarname)
+
+        # Use the imported schema
+        sssd_config = SimpleSSSDConfig(
+            schemafile=os.path.join(tar_dir, "sssd.api.conf"),
+            schemaplugindir=os.path.join(tar_dir, "sssd.api.d"))
         sssd_config.import_config(temp_config_file)
-        sssd_domain = sssd_config.get_domain(domain)
 
-        if provider_subtype is not None:
-            sssd_domain.add_provider(provider, provider_subtype)
-
-        for m in mod_dict:
-            sssd_domain.set_option(m, mod_dict[m])
-
-        sssd_config.save_domain(sssd_domain)
+        yield sssd_config
 
         new_config = sssd_config.dump(sssd_config.opts).encode('utf-8')
         host.transport.put_file_contents(paths.SSSD_CONF, new_config)
     finally:
         try:
             os.remove(temp_config_file)
+            shutil.rmtree(tar_dir)
         except OSError:
             pass
 
@@ -665,28 +868,38 @@ def sync_time(host, server):
     host.run_command(['ntpdate', server.hostname])
 
 
-def connect_replica(master, replica, domain_level=None):
+def connect_replica(master, replica, domain_level=None,
+                    database=DOMAIN_SUFFIX_NAME):
     if domain_level is None:
         domain_level = master.config.domain_level
     if domain_level == DOMAIN_LEVEL_0:
-        replica.run_command(['ipa-replica-manage', 'connect', master.hostname])
+        if database == DOMAIN_SUFFIX_NAME:
+            cmd = 'ipa-replica-manage'
+        else:
+            cmd = 'ipa-csreplica-manage'
+        replica.run_command([cmd, 'connect', master.hostname])
     else:
         kinit_admin(master)
-        master.run_command(["ipa", "topologysegment-add", DOMAIN_SUFFIX_NAME,
+        master.run_command(["ipa", "topologysegment-add", database,
                             "%s-to-%s" % (master.hostname, replica.hostname),
                             "--leftnode=%s" % master.hostname,
                             "--rightnode=%s" % replica.hostname
                             ])
 
 
-def disconnect_replica(master, replica, domain_level=None):
+def disconnect_replica(master, replica, domain_level=None,
+                       database=DOMAIN_SUFFIX_NAME):
     if domain_level is None:
         domain_level = master.config.domain_level
     if domain_level == DOMAIN_LEVEL_0:
-        replica.run_command(['ipa-replica-manage', 'disconnect', master.hostname])
+        if database == DOMAIN_SUFFIX_NAME:
+            cmd = 'ipa-replica-manage'
+        else:
+            cmd = 'ipa-csreplica-manage'
+        replica.run_command([cmd, 'disconnect', master.hostname])
     else:
         kinit_admin(master)
-        master.run_command(["ipa", "topologysegment-del", DOMAIN_SUFFIX_NAME,
+        master.run_command(["ipa", "topologysegment-del", database,
                             "%s-to-%s" % (master.hostname, replica.hostname),
                             "--continue"
                             ])
@@ -698,19 +911,26 @@ def kinit_admin(host, raiseonerr=True):
 
 
 def uninstall_master(host, ignore_topology_disconnect=True,
-                     ignore_last_of_role=True, clean=True):
+                     ignore_last_of_role=True, clean=True, verbose=False,
+                     domain_level=None):
     host.collect_log(paths.IPASERVER_UNINSTALL_LOG)
     uninstall_cmd = ['ipa-server-install', '--uninstall', '-U']
 
-    host_domain_level = domainlevel(host)
+    if domain_level is None:
+        domain_level = domainlevel(host)
 
-    if ignore_topology_disconnect and host_domain_level != DOMAIN_LEVEL_0:
+    if ignore_topology_disconnect and domain_level != DOMAIN_LEVEL_0:
         uninstall_cmd.append('--ignore-topology-disconnect')
 
-    if ignore_last_of_role and host_domain_level != DOMAIN_LEVEL_0:
+    if ignore_last_of_role and domain_level != DOMAIN_LEVEL_0:
         uninstall_cmd.append('--ignore-last-of-role')
 
-    host.run_command(uninstall_cmd, raiseonerr=False)
+    if verbose and domain_level != DOMAIN_LEVEL_0:
+        uninstall_cmd.append('-v')
+
+    result = host.run_command(uninstall_cmd)
+    assert "Traceback" not in result.stdout_text
+
     host.run_command(['pkidestroy', '-s', 'CA', '-i', 'pki-tomcat'],
                      raiseonerr=False)
     host.run_command(['rm', '-rf',
@@ -1108,6 +1328,39 @@ def wait_for_replication(ldap, timeout=30):
         logger.error('Giving up wait for replication to finish')
 
 
+def wait_for_cleanallruv_tasks(ldap, timeout=30):
+    """Wait until cleanallruv tasks are finished
+    """
+    logger.debug('Waiting for cleanallruv tasks to finish')
+    success_status = 'Successfully cleaned rid'
+    for i in range(timeout):
+        status_attr = 'nstaskstatus'
+        try:
+            entries = ldap.get_entries(
+                DN(('cn', 'cleanallruv'), ('cn', 'tasks'), ('cn', 'config')),
+                scope=ldap.SCOPE_ONELEVEL,
+                attrs_list=[status_attr])
+        except errors.EmptyResult:
+            logger.debug("No cleanallruv tasks")
+            break
+        # Check status
+        if all(
+            e.single_value[status_attr].startswith(success_status)
+            for e in entries
+        ):
+            logger.debug("All cleanallruv tasks finished successfully")
+            break
+        logger.debug("cleanallruv task in progress, (waited %s/%ss)",
+                     i, timeout)
+        time.sleep(1)
+    else:
+        logger.error('Giving up waiting for cleanallruv to finish')
+        for e in entries:
+            stat_str = e.single_value[status_attr]
+            if not stat_str.startswith(success_status):
+                logger.debug('%s status: %s', e.dn, stat_str)
+
+
 def add_a_records_for_hosts_in_master_domain(master):
     for host in master.domain.hosts:
         # We don't need to take care of the zone creation since it is master
@@ -1188,8 +1441,10 @@ def install_kra(host, domain_level=None, first_instance=False, raiseonerr=True):
     return result
 
 
-def install_ca(host, domain_level=None, first_instance=False,
-               external_ca=False, cert_files=None, raiseonerr=True):
+def install_ca(
+        host, domain_level=None, first_instance=False, external_ca=False,
+        cert_files=None, raiseonerr=True, extra_args=()
+):
     if domain_level is None:
         domain_level = domainlevel(host)
     command = ["ipa-ca-install", "-U", "-p", host.config.dirman_password,
@@ -1197,6 +1452,9 @@ def install_ca(host, domain_level=None, first_instance=False,
     if domain_level == DOMAIN_LEVEL_0 and not first_instance:
         replica_file = get_replica_filename(host)
         command.append(replica_file)
+    if not isinstance(extra_args, (tuple, list)):
+        raise TypeError("extra_args must be tuple or list")
+    command.extend(extra_args)
     # First step of ipa-ca-install --external-ca
     if external_ca:
         command.append('--external-ca')
@@ -1274,6 +1532,20 @@ def run_certutil(host, args, reqdir, dbtype=None,
                             stdin_text=stdin)
 
 
+def upload_temp_contents(host, contents):
+    """Upload contents to a temporary file
+
+    :param host: Remote host instance
+    :param contents: file content (str, bytes)
+    :param encoding: file encoding
+    :return: Temporary file name
+    """
+    result = host.run_command(['mktemp'])
+    tmpname = result.stdout_text.strip()
+    host.put_file_contents(tmpname, contents)
+    return tmpname
+
+
 def assert_error(result, stderr_text, returncode=None):
     "Assert that `result` command failed and its stderr contains `stderr_text`"
     assert stderr_text in result.stderr_text, result.stderr_text
@@ -1331,12 +1603,10 @@ def run_repeatedly(host, command, assert_zero_rc=True, test=None,
 
 
 def get_host_ip_with_hostmask(host):
-    """
-    Detects the IP of the host including the hostmask.
+    """Detects the IP of the host including the hostmask
 
     Returns None if the IP could not be detected.
     """
-
     ip = host.ip
     result = host.run_command(['ip', 'addr'])
     full_ip_regex = r'(?P<full_ip>%s/\d{1,2}) ' % re.escape(ip)
@@ -1344,17 +1614,45 @@ def get_host_ip_with_hostmask(host):
 
     if match:
         return match.group('full_ip')
+    else:
+        return None
 
 
-def ldappasswd_user_change(user, oldpw, newpw, master):
+def ldappasswd_user_change(user, oldpw, newpw, master, use_dirman=False):
     container_user = dict(DEFAULT_CONFIG)['container_user']
     basedn = master.domain.basedn
 
     userdn = "uid={},{},{}".format(user, container_user, basedn)
-    master_ldap_uri = "ldap://{}".format(master.external_hostname)
+    master_ldap_uri = "ldap://{}".format(master.hostname)
 
-    args = [paths.LDAPPASSWD, '-D', userdn, '-w', oldpw, '-a', oldpw,
-            '-s', newpw, '-x', '-H', master_ldap_uri]
+    if use_dirman:
+        args = [paths.LDAPPASSWD, '-D',
+                str(master.config.dirman_dn),  # pylint: disable=no-member
+                '-w', master.config.dirman_password,
+                '-s', newpw, '-x', '-ZZ', '-H', master_ldap_uri, userdn]
+    else:
+        args = [paths.LDAPPASSWD, '-D', userdn, '-w', oldpw, '-a', oldpw,
+                '-s', newpw, '-x', '-ZZ', '-H', master_ldap_uri]
+    master.run_command(args)
+
+
+def ldappasswd_sysaccount_change(user, oldpw, newpw, master, use_dirman=False):
+    container_sysaccounts = dict(DEFAULT_CONFIG)['container_sysaccounts']
+    basedn = master.domain.basedn
+
+    userdn = "uid={},{},{}".format(user, container_sysaccounts, basedn)
+    master_ldap_uri = "ldap://{}".format(master.hostname)
+
+    if use_dirman:
+        args = [paths.LDAPPASSWD, '-D',
+                str(master.config.dirman_dn),  # pylint: disable=no-member
+                '-w', master.config.dirman_password,
+                '-a', oldpw,
+                '-s', newpw, '-x', '-ZZ', '-H', master_ldap_uri,
+                userdn]
+    else:
+        args = [paths.LDAPPASSWD, '-D', userdn, '-w', oldpw, '-a', oldpw,
+                '-s', newpw, '-x', '-ZZ', '-H', master_ldap_uri]
     master.run_command(args)
 
 
@@ -1382,3 +1680,273 @@ def add_dns_zone(master, zone, skip_overlap_check=False,
                                     host.hostname + ".", '--a-rec', host.ip])
     else:
         logger.debug('Zone %s already added.', zone)
+
+
+def sign_ca_and_transport(host, csr_name, root_ca_name, ipa_ca_name):
+    """
+    Sign ipa csr and save signed CA together with root CA back to the host.
+    Returns root CA and IPA CA paths on the host.
+    """
+
+    test_dir = host.config.test_dir
+
+    # Get IPA CSR as bytes
+    ipa_csr = host.get_file_contents(csr_name)
+
+    external_ca = ExternalCA()
+    # Create root CA
+    root_ca = external_ca.create_ca()
+    # Sign CSR
+    ipa_ca = external_ca.sign_csr(ipa_csr)
+
+    root_ca_fname = os.path.join(test_dir, root_ca_name)
+    ipa_ca_fname = os.path.join(test_dir, ipa_ca_name)
+
+    # Transport certificates (string > file) to master
+    host.put_file_contents(root_ca_fname, root_ca)
+    host.put_file_contents(ipa_ca_fname, ipa_ca)
+
+    return (root_ca_fname, ipa_ca_fname)
+
+
+def generate_ssh_keypair():
+    """
+    Create SSH keypair for key authentication testing
+    """
+    key = rsa.generate_private_key(backend=default_backend(),
+                                   public_exponent=65537,
+                                   key_size=2048)
+
+    public_key = key.public_key().public_bytes(
+        serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
+
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption()
+    )
+
+    private_key_str = pem.decode('utf-8')
+    public_key_str = public_key.decode('utf-8')
+
+    return (private_key_str, public_key_str)
+
+
+def strip_cert_header(pem):
+    """
+    Remove the header and footer from a certificate.
+    """
+    regexp = (
+        r"^-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----"
+    )
+    s = re.search(regexp, pem, re.MULTILINE | re.DOTALL)
+    if s is not None:
+        return s.group(1)
+    else:
+        return pem
+
+
+def user_add(host, login, first='test', last='user', extra_args=(),
+             password=None):
+    cmd = [
+        "ipa", "user-add", login,
+        "--first", first,
+        "--last", last
+    ]
+    if password is not None:
+        cmd.append('--password')
+        stdin_text = '{0}\n{0}\n'.format(password)
+    else:
+        stdin_text = None
+    cmd.extend(extra_args)
+    return host.run_command(cmd, stdin_text=stdin_text)
+
+
+def group_add(host, groupname, extra_args=()):
+    cmd = [
+        "ipa", "group-add", groupname,
+    ]
+    cmd.extend(extra_args)
+    return host.run_command(cmd)
+
+
+def create_temp_file(host, directory=None, create_file=True):
+    """Creates temproray file using mktemp."""
+    cmd = ['mktemp']
+    if create_file is False:
+        cmd += ['--dry-run']
+    if directory is not None:
+        cmd += ['-p', directory]
+    return host.run_command(cmd).stdout_text
+
+
+def create_active_user(host, login, password, first='test', last='user'):
+    """Create user and do login to set password"""
+    temp_password = 'Secret456789'
+    kinit_admin(host)
+    user_add(host, login, first=first, last=last, password=temp_password)
+    host.run_command(
+        ['kinit', login],
+        stdin_text='{0}\n{1}\n{1}\n'.format(temp_password, password))
+    kdestroy_all(host)
+
+
+def kdestroy_all(host):
+    return host.run_command(['kdestroy', '-A'])
+
+
+def run_command_as_user(host, user, command, *args, **kwargs):
+    """Run command on remote host using 'su -l'
+
+    Arguments are similar to Host.run_command
+    """
+    if not isinstance(command, str):
+        command = ' '.join(quote(s) for s in command)
+    cwd = kwargs.pop('cwd', None)
+    if cwd is not None:
+        command = 'cd {}; {}'.format(quote(cwd), command)
+    command = ['su', '-l', user, '-c', command]
+    return host.run_command(command, *args, **kwargs)
+
+
+def kinit_as_user(host, user, password):
+    host.run_command(['kinit', user], stdin_text=password + '\n')
+
+
+class FileBackup(object):
+    """Create file backup and do restore on remote host
+
+    Examples:
+
+        config_backup = FileBackup(host, '/etc/some.conf')
+        ... modify the file and do the test ...
+        config_backup.restore()
+
+    Use as a context manager:
+
+        with FileBackup(host, '/etc/some.conf'):
+            ... modify the file and do the test ...
+
+    """
+
+    def __init__(self, host, filename):
+        """Create file backup."""
+        self._host = host
+        self._filename = filename
+        self._backup = create_temp_file(host)
+        host.run_command(['cp', '--preserve=all', filename, self._backup])
+
+    def restore(self):
+        """Restore file. Can be called only once."""
+        self._host.run_command(['mv', self._backup, self._filename])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.restore()
+
+
+@contextmanager
+def remote_ini_file(host, filename):
+    """Context manager for editing an ini file on a remote host.
+
+    It provides RawConfigParser object which is automatically serialized and
+    uploaded to remote host upon exit from the context.
+
+    If exception is raised inside the context then the ini file is NOT updated
+    on remote host.
+
+    Example:
+
+        with remote_ini_file(master, '/etc/some.conf') as some_conf:
+            some_conf.set('main', 'timeout', 10)
+
+
+    """
+    data = host.get_file_contents(filename, encoding='utf-8')
+    ini_file = configparser.RawConfigParser()
+    # provide python2/3 compatibility
+    if hasattr(ini_file, 'read_string'):
+        ini_file.read_string(data)  # pylint: disable=no-member
+    else:
+        ini_file.readfp(StringIO(data))  # pylint: disable=deprecated-method
+    yield ini_file
+    data = StringIO()
+    ini_file.write(data)
+    host.put_file_contents(filename, data.getvalue())
+
+
+def is_selinux_enabled(host):
+    res = host.run_command('selinuxenabled', ok_returncode=(0, 1))
+    return res.returncode == 0
+
+
+def get_logsize(host, logfile):
+    """ get current logsize"""
+    logsize = len(host.get_file_contents(logfile))
+    return logsize
+
+
+def wait_for_certmonger_status(host, status, request_id, timeout=120):
+    """Aggressively wait for a specific certmonger status.
+
+       This checks the status every second in order to attempt to
+       catch transient states like SUBMITTED. There are no guarantees.
+
+       :param host: the host where the uninstallation takes place
+       :param status: tuple of statuses to look for
+       :param request_id: request_id of request to check status on
+       :param timeout: max time in seconds to wait for the status
+    """
+    for _i in range(0, timeout, 1):
+        result = host.run_command(
+            "getcert list -i %s | grep status: | awk '{ print $2 }'" %
+            request_id
+        )
+
+        state = result.stdout_text.strip()
+        logger.info("certmonger request is in state %s", state)
+        if state in status:
+            break
+        time.sleep(1)
+    else:
+        raise RuntimeError("request timed out")
+
+    return state
+
+
+def ldapmodify_dm(host, ldif_text, **kwargs):
+    """Run ldapmodify as Directory Manager
+
+    :param host: host object
+    :param ldif_text: ldif string
+    :param kwargs: additional keyword arguments to run_command()
+    :return: result object
+    """
+    # no hard-coded hostname, let ldapmodify pick up the host from ldap.conf.
+    args = [
+        'ldapmodify',
+        '-x',
+        '-D', str(host.config.dirman_dn),  # pylint: disable=no-member
+        '-w', host.config.dirman_password
+    ]
+    return host.run_command(args, stdin_text=ldif_text, **kwargs)
+
+
+def get_sssd_version(host):
+    """Get sssd version on remote host."""
+    version = host.run_command('sssd --version').stdout_text.strip()
+    return parse_version(version)
+
+
+def get_pki_version(host):
+    """Get pki version on remote host."""
+    data = host.get_file_contents("/usr/share/pki/VERSION", encoding="utf-8")
+
+    groups = re.match(r'.*\nSpecification-Version: ([\d+\.]*)\n.*', data)
+    if groups:
+        version_string = groups.groups(0)[0]
+        return parse_version(version_string)
+    else:
+        raise ValueError("get_pki_version: pki is not installed")

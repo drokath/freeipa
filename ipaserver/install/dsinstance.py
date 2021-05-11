@@ -18,7 +18,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 
 import logging
 import shutil
@@ -262,6 +262,7 @@ class DsInstance(service.Service):
         self.step("adding default schema", self.__add_default_schemas)
         self.step("enabling memberof plugin", self.__add_memberof_module)
         self.step("enabling winsync plugin", self.__add_winsync_module)
+        self.step("configure password logging", self.__password_logging)
         self.step("configuring replication version plugin", self.__config_version_module)
         self.step("enabling IPA enrollment plugin", self.__add_enrollment_module)
         self.step("configuring uniqueness plugin", self.__set_unique_attrs)
@@ -418,6 +419,20 @@ class DsInstance(service.Service):
 
         self.start_creation(runtime=30)
 
+    def _get_replication_manager(self):
+        # Always connect to self over ldapi
+        ldap_uri = ipaldap.get_ldap_uri(protocol='ldapi', realm=self.realm)
+        conn = ipaldap.LDAPClient(ldap_uri)
+        conn.external_bind()
+        repl = replication.ReplicationManager(
+            self.realm, self.fqdn, self.dm_password, conn=conn
+        )
+        if self.dm_password is not None and not self.promote:
+            bind_dn = DN(('cn', 'Directory Manager'))
+            bind_pw = self.dm_password
+        else:
+            bind_dn = bind_pw = None
+        return repl, bind_dn, bind_pw
 
     def __setup_replica(self):
         """
@@ -434,25 +449,23 @@ class DsInstance(service.Service):
             self.realm,
             self.dm_password)
 
-        # Always connect to self over ldapi
-        ldap_uri = ipaldap.get_ldap_uri(protocol='ldapi', realm=self.realm)
-        conn = ipaldap.LDAPClient(ldap_uri)
-        conn.external_bind()
-        repl = replication.ReplicationManager(self.realm,
-                                              self.fqdn,
-                                              self.dm_password, conn=conn)
-
-        if self.dm_password is not None and not self.promote:
-            bind_dn = DN(('cn', 'Directory Manager'))
-            bind_pw = self.dm_password
-        else:
-            bind_dn = bind_pw = None
-
-        repl.setup_promote_replication(self.master_fqdn,
-                                       r_binddn=bind_dn,
-                                       r_bindpw=bind_pw,
-                                       cacert=self.ca_file)
+        repl, bind_dn, bind_pw = self._get_replication_manager()
+        repl.setup_promote_replication(
+            self.master_fqdn,
+            r_binddn=bind_dn,
+            r_bindpw=bind_pw,
+            cacert=self.ca_file
+        )
         self.run_init_memberof = repl.needs_memberof_fixup()
+
+    def finalize_replica_config(self):
+        repl, bind_dn, bind_pw = self._get_replication_manager()
+        repl.finalize_replica_config(
+            self.master_fqdn,
+            r_binddn=bind_dn,
+            r_bindpw=bind_pw,
+            cacert=self.ca_file
+        )
 
     def __configure_sasl_mappings(self):
         # we need to remove any existing SASL mappings in the directory as otherwise they
@@ -639,21 +652,27 @@ class DsInstance(service.Service):
             # Does not apply with newer DS releases
             pass
 
-    def start(self, *args, **kwargs):
-        super(DsInstance, self).start(*args, **kwargs)
+    def start(self, instance_name="", capture_output=True, wait=True):
+        super(DsInstance, self).start(
+            instance_name, capture_output=capture_output, wait=wait
+        )
         api.Backend.ldap2.connect()
 
-    def stop(self, *args, **kwargs):
+    def stop(self, instance_name="", capture_output=True):
         if api.Backend.ldap2.isconnected():
             api.Backend.ldap2.disconnect()
 
-        super(DsInstance, self).stop(*args, **kwargs)
+        super(DsInstance, self).stop(
+            instance_name, capture_output=capture_output
+        )
 
-    def restart(self, instance=''):
+    def restart(self, instance_name="", capture_output=True, wait=True):
         api.Backend.ldap2.disconnect()
         try:
-            super(DsInstance, self).restart(instance)
-            if not is_ds_running(instance):
+            super(DsInstance, self).restart(
+                instance_name, capture_output=capture_output, wait=wait
+            )
+            if not is_ds_running(instance_name):
                 logger.critical("Failed to restart the directory server. "
                                 "See the installation log for details.")
                 raise ScriptError()
@@ -729,6 +748,9 @@ class DsInstance(service.Service):
 
     def __add_winsync_module(self):
         self._ldap_mod("ipa-winsync-conf.ldif")
+
+    def __password_logging(self):
+        self._ldap_mod("pw-logging-conf.ldif")
 
     def __config_version_module(self):
         self._ldap_mod("version-conf.ldif")
@@ -839,7 +861,9 @@ class DsInstance(service.Service):
                     ca='IPA',
                     profile=dogtag.DEFAULT_PROFILE,
                     dns=[self.fqdn],
-                    post_command=cmd)
+                    post_command=cmd,
+                    resubmit_timeout=api.env.replication_wait_timeout
+                )
             finally:
                 if prev_helper is not None:
                     certmonger.modify_ca_helper('IPA', prev_helper)
@@ -878,7 +902,11 @@ class DsInstance(service.Service):
             nsSSLToken=["internal (software)"],
             nsSSLActivation=["on"],
         )
-        conn.add_entry(entry)
+        try:
+            conn.add_entry(entry)
+        except errors.DuplicateEntry:
+            # 389-DS >= 1.4.0 has a default entry, update it.
+            conn.update_entry(entry)
 
         conn.unbind()
 

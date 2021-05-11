@@ -282,9 +282,12 @@ def check_required_principal(ldap, principal):
     try:
         host_is_master(ldap, principal.hostname)
     except errors.ValidationError:
-        service_types = ['HTTP', 'ldap', 'DNS', 'dogtagldap']
-        if principal.service_name in service_types:
-            raise errors.ValidationError(name='principal', error=_('This principal is required by the IPA master'))
+        service_types = {'http', 'ldap', 'dns', 'dogtagldap'}
+        if principal.service_name.lower() in service_types:
+            raise errors.ValidationError(
+                name='principal',
+                error=_('%s is required by the IPA master') % (principal)
+            )
 
 def update_krbticketflags(ldap, entry_attrs, attrs_list, options, existing):
     add = remove = 0
@@ -703,7 +706,8 @@ class service_mod(LDAPUpdate):
             removed_certs = set(old_certs) - set(certs)
             for cert in removed_certs:
                 rm_certs = api.Command.cert_find(
-                    certificate=cert.public_bytes(x509.Encoding.DER))['result']
+                    certificate=cert.public_bytes(x509.Encoding.DER),
+                    service=keys)['result']
                 revoke_certs(rm_certs)
 
         if certs:
@@ -983,7 +987,9 @@ class service_remove_cert(LDAPRemoveAttributeViaOption):
         assert isinstance(dn, DN)
 
         for cert in options.get('usercertificate', []):
-            revoke_certs(api.Command.cert_find(certificate=cert)['result'])
+            revoke_certs(api.Command.cert_find(
+                certificate=cert,
+                service=keys)['result'])
 
         return dn
 

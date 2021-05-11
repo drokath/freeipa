@@ -578,6 +578,7 @@ static int ldap_get_keytab(krb5_context krbctx, bool generate, char *password,
     if (enctypes) {
         ret = ipa_string_to_enctypes(enctypes, &es, &num_es, err_msg);
         if (ret || num_es == 0) {
+            free(es);
             return LDAP_OPERATIONS_ERROR;
         }
     }
@@ -625,33 +626,57 @@ done:
     return ret;
 }
 
-static char *ask_password(krb5_context krbctx)
+/* Prompt for either a password.
+ * This can be either asking for a new or existing password.
+ *
+ * To set a new password provide values for both prompt1 and prompt2 and
+ * set match=true to enforce that the two entered passwords match.
+ *
+ * To prompt for an existing password provide prompt1 and set match=false.
+ *
+ * Implementation details:
+ * krb5_prompter_posix() does not differentiate between too long entry or
+ * an entry exactly the size of a buffer. Thus, allocate a bigger buffer
+ * and do the check for a too long password afterwards.
+ */
+static char *ask_password(krb5_context krbctx, char *prompt1, char *prompt2,
+                          bool match)
 {
     krb5_prompt ap_prompts[2];
     krb5_data k5d_pw0;
     krb5_data k5d_pw1;
-    char pw0[256];
-    char pw1[256];
+#define MAX(a,b) (((a)>(b))?(a):(b))
+#define PWD_BUFFER_SIZE MAX((IPAPWD_PASSWORD_MAX_LEN + 2), 1024)
+    char pw0[PWD_BUFFER_SIZE];
+    char pw1[PWD_BUFFER_SIZE];
     char *password;
+    int num_prompts = match ? 2:1;
 
     k5d_pw0.length = sizeof(pw0);
     k5d_pw0.data = pw0;
-    ap_prompts[0].prompt = _("New Principal Password");
+    ap_prompts[0].prompt = prompt1;
     ap_prompts[0].hidden = 1;
     ap_prompts[0].reply = &k5d_pw0;
 
-    k5d_pw1.length = sizeof(pw1);
-    k5d_pw1.data = pw1;
-    ap_prompts[1].prompt = _("Verify Principal Password");
-    ap_prompts[1].hidden = 1;
-    ap_prompts[1].reply = &k5d_pw1;
+    if (match) {
+        k5d_pw1.length = sizeof(pw1);
+        k5d_pw1.data = pw1;
+        ap_prompts[1].prompt = prompt2;
+        ap_prompts[1].hidden = 1;
+        ap_prompts[1].reply = &k5d_pw1;
+    }
 
     krb5_prompter_posix(krbctx, NULL,
                 NULL, NULL,
-                2, ap_prompts);
+                num_prompts, ap_prompts);
 
-    if (strcmp(pw0, pw1)) {
-        fprintf(stderr, _("Passwords do not match!"));
+    if (match && (strcmp(pw0, pw1))) {
+        fprintf(stderr, _("Passwords do not match!\n"));
+        return NULL;
+    }
+
+    if (k5d_pw0.length > IPAPWD_PASSWORD_MAX_LEN) {
+        fprintf(stderr, "%s\n", ipapwd_password_max_len_errmsg);
         return NULL;
     }
 
@@ -751,6 +776,7 @@ int main(int argc, const char *argv[])
 	static const char *ca_cert_file = NULL;
 	int quiet = 0;
 	int askpass = 0;
+	int askbindpw = 0;
 	int permitted_enctypes = 0;
 	int retrieve = 0;
         struct poptOption options[] = {
@@ -777,6 +803,8 @@ int main(int argc, const char *argv[])
               _("LDAP DN"), _("DN to bind as if not using kerberos") },
 	    { "bindpw", 'w', POPT_ARG_STRING, &bindpw, 0,
               _("LDAP password"), _("password to use if not using kerberos") },
+	    { NULL, 'W', POPT_ARG_NONE, &askbindpw, 0,
+              _("Prompt for LDAP password"), NULL },
 	    { "cacert", 0, POPT_ARG_STRING, &ca_cert_file, 0,
               _("Path to the IPA CA certificate"), _("IPA CA certificate")},
 	    { "ldapuri", 'H', POPT_ARG_STRING, &ldap_uri, 0,
@@ -848,9 +876,24 @@ int main(int argc, const char *argv[])
 		exit(2);
 	}
 
+    if (askbindpw && bindpw != NULL) {
+		fprintf(stderr, _("Bind password already provided (-w).\n"));
+		if (!quiet) {
+			poptPrintUsage(pc, stderr, 0);
+		}
+		exit(2);
+    }
+
+    if (askbindpw) {
+		bindpw = ask_password(krbctx, _("Enter LDAP password"), NULL, false);
+		if (!bindpw) {
+			exit(2);
+		}
+    }
+
 	if (NULL!=binddn && NULL==bindpw) {
 		fprintf(stderr,
-                        _("Bind password required when using a bind DN.\n"));
+                        _("Bind password required when using a bind DN (-w or -W).\n"));
 		if (!quiet)
 			poptPrintUsage(pc, stderr, 0);
 		exit(10);
@@ -914,7 +957,8 @@ int main(int argc, const char *argv[])
     }
 
         if (askpass) {
-		password = ask_password(krbctx);
+		password = ask_password(krbctx, _("New Principal Password"),
+               	                _("Verify Principal Password"), true);
 		if (!password) {
 			exit(2);
 		}
@@ -985,6 +1029,7 @@ int main(int argc, const char *argv[])
             }
 
             fprintf(stderr, _("Failed to create key material\n"));
+            free_keys_contents(krbctx, &keys);
             exit(8);
         }
 

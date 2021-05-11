@@ -13,7 +13,7 @@ python:
 cache: pip
 env:
     global:
-        - TEST_RUNNER_IMAGE="freeipa/freeipa-test-runner:master-latest"
+        - TEST_RUNNER_IMAGE="freeipa/freeipa-test-runner:ipa-4-6_f27"
           PEP8_ERROR_LOG="pycodestyle_errors.log"
           CI_RESULTS_LOG="ci_results_${TRAVIS_BRANCH}.log"
           CI_BACKLOG_SIZE=5000
@@ -52,13 +52,17 @@ env:
                 test_ipapython
                 test_ipaserver
                 test_xmlrpc/test_[l-z]*.py"
-        - TASK_TO_RUN="tox"
-          TEST_RUNNER_CONFIG=".test_runner_config.yaml"
+        #- TASK_TO_RUN="tox"
+        #  TEST_RUNNER_CONFIG=".test_runner_config.yaml"
 
 before_install:
     - ip addr show
     - ls /proc/net
     - cat /proc/net/if_inet6
+    # Enable IPv6 back in Travis CI
+    # https://github.com/travis-ci/travis-ci/issues/8891
+    - echo '{"ipv6":true,"fixed-cidr-v6":"2001:db8:1::/64"}' | sudo tee /etc/docker/daemon.json
+    - sudo service docker restart
 #    - ip addr show dev lo | grep -q inet6 || (echo "No IPv6 address found"; exit 1)
 
 install:

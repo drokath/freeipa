@@ -51,6 +51,13 @@ from ipapython.ipa_log_manager import (
     LOGGING_FORMAT_STDERR)
 from ipapython.version import VERSION, API_VERSION, DEFAULT_PLUGINS
 
+# pylint: disable=no-name-in-module, import-error
+if six.PY3:
+    from collections.abc import Mapping
+else:
+    from collections import Mapping
+# pylint: enable=no-name-in-module, import-error
+
 if six.PY3:
     unicode = str
 
@@ -223,7 +230,6 @@ class Plugin(ReadOnly):
         This method is called from `finalize()`. Subclasses can override this
         method in order to add custom finalization.
         """
-        pass
 
     def ensure_finalized(self):
         """
@@ -282,7 +288,7 @@ class Plugin(ReadOnly):
         )
 
 
-class APINameSpace(collections.Mapping):
+class APINameSpace(Mapping):
     def __init__(self, api, base):
         self.__api = api
         self.__base = base
@@ -448,7 +454,7 @@ class API(ReadOnly):
         if root_logger.handlers or self.env.validate_api:
             return
 
-        if self.env.debug:
+        if self.env.debug:  # pylint: disable=using-constant-test
             level = logging.DEBUG
         else:
             level = logging.INFO
@@ -472,7 +478,7 @@ class API(ReadOnly):
 
         # Add stderr handler:
         level = logging.INFO
-        if self.env.debug:
+        if self.env.debug:  # pylint: disable=using-constant-test
             level = logging.DEBUG
         else:
             if self.env.context == 'cli':
@@ -504,7 +510,7 @@ class API(ReadOnly):
                 return
 
         level = logging.INFO
-        if self.env.debug:
+        if self.env.debug:  # pylint: disable=using-constant-test
             level = logging.DEBUG
         try:
             handler = logging.FileHandler(self.env.log)
@@ -638,7 +644,7 @@ class API(ReadOnly):
 
         logger.debug("importing all plugin modules in %s...", package_name)
         modules = getattr(package, 'modules', find_modules_in_dir(package_dir))
-        modules = ['.'.join((package_name, name)) for name in modules]
+        modules = ['.'.join((package_name, mname)) for mname in modules]
 
         for name in modules:
             logger.debug("importing plugin module %s", name)
@@ -648,7 +654,8 @@ class API(ReadOnly):
                 logger.debug("skipping plugin module %s: %s", name, e.reason)
                 continue
             except Exception as e:
-                if self.env.startup_traceback:
+                tb = self.env.startup_traceback
+                if tb:  # pylint: disable=using-constant-test
                     logger.exception("could not load plugin module %s", name)
                 raise
 

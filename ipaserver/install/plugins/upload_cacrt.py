@@ -17,6 +17,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from __future__ import absolute_import
+
 import logging
 
 from ipalib.install import certstore
@@ -90,7 +92,7 @@ class update_upload_cacrt(Updater):
                 config = entry.setdefault('ipaConfigString', [])
                 if ca_enabled:
                     config.append('ipaCa')
-                config.append('ipaCa')
+                config.append('compatCA')
 
             try:
                 ldap.add_entry(entry)
@@ -113,7 +115,18 @@ class update_upload_cacrt(Updater):
                 entry.single_value['cACertificate;binary'] = ca_cert
                 ldap.add_entry(entry)
             else:
-                if b'' in entry['cACertificate;binary']:
+                force_write = False
+                try:
+                    _cert_bin = entry['cACertificate;binary']
+                except ValueError:
+                    # BZ 1644874
+                    # sometimes the cert is badly stored, twice encoded
+                    # force write to fix the value
+                    logger.debug('Fixing the value of cACertificate;binary '
+                                 'in entry %s', entry.dn)
+                    force_write = True
+
+                if force_write or b'' in entry['cACertificate;binary']:
                     entry.single_value['cACertificate;binary'] = ca_cert
                     ldap.update_entry(entry)
 

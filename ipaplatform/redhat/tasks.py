@@ -23,13 +23,15 @@
 This module contains default Red Hat OS family-specific implementations of
 system tasks.
 '''
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 
 import logging
 import os
 import socket
 import traceback
 import errno
+import subprocess
+import sys
 
 from ctypes.util import find_library
 from functools import total_ordering
@@ -57,22 +59,6 @@ int rpmvercmp (const char *a, const char *b);
 # use ctypes loader to get correct librpm.so library version according to
 # https://cffi.readthedocs.org/en/latest/overview.html#id8
 _librpm = _ffi.dlopen(find_library("rpm"))
-
-
-def selinux_enabled():
-    """
-    Check if SELinux is enabled.
-    """
-    if os.path.exists(paths.SELINUXENABLED):
-        try:
-            ipautil.run([paths.SELINUXENABLED])
-            return True
-        except ipautil.CalledProcessError:
-            # selinuxenabled returns 1 if not enabled
-            return False
-    else:
-        # No selinuxenabled, no SELinux
-        return False
 
 
 @total_ordering
@@ -111,12 +97,25 @@ class RedHatTaskNamespace(BaseTaskNamespace):
 
         ipautil.run() will do the logging.
         """
-
-        if not selinux_enabled():
+        if not self.is_selinux_enabled():
             return
 
         if (os.path.exists(restorecon)):
             ipautil.run([restorecon, filepath], raiseonerr=False)
+
+    def is_selinux_enabled(self):
+        """Check if SELinux is available and enabled
+        """
+        try:
+            ipautil.run([paths.SELINUXENABLED])
+        except ipautil.CalledProcessError:
+            # selinuxenabled returns 1 if not enabled
+            return False
+        except OSError:
+            # selinuxenabled binary not available
+            return False
+        else:
+            return True
 
     def check_selinux_status(self, restorecon=paths.RESTORECON):
         """
@@ -128,13 +127,14 @@ class RedHatTaskNamespace(BaseTaskNamespace):
         This function returns nothing but may raise a Runtime exception
         if SELinux is enabled but restorecon is not available.
         """
-        if not selinux_enabled():
-            return
+        if not self.is_selinux_enabled():
+            return False
 
         if not os.path.exists(restorecon):
             raise RuntimeError('SELinux is enabled but %s does not exist.\n'
                                'Install the policycoreutils package and start '
                                'the installation again.' % restorecon)
+        return True
 
     def check_ipv6_stack_enabled(self):
         """Checks whether IPv6 kernel module is loaded.
@@ -152,12 +152,6 @@ class RedHatTaskNamespace(BaseTaskNamespace):
                 "globally, disable it on the specific interfaces in "
                 "sysctl.conf except 'lo' interface.")
 
-        # XXX This is a hack to work around an issue with Travis CI by
-        # skipping IPv6 address test. The Dec 2017 update removed ::1 from
-        # loopback, see https://github.com/travis-ci/travis-ci/issues/8891.
-        if os.environ.get('TRAVIS') == 'true':
-            return
-
         try:
             localhost6 = ipautil.CheckedIPAddress('::1', allow_loopback=True)
             if localhost6.get_matching_interface() is None:
@@ -168,6 +162,26 @@ class RedHatTaskNamespace(BaseTaskNamespace):
                  "interface that has ::1 address assigned. Add ::1 address "
                  "resolution to 'lo' interface. You might need to enable IPv6 "
                  "on the interface 'lo' in sysctl.conf.")
+
+    def detect_container(self):
+        """Check if running inside a container
+
+        :returns: container runtime or None
+        :rtype: str, None
+        """
+        try:
+            output = subprocess.check_output(
+                [paths.SYSTEMD_DETECT_VIRT, '--container'],
+                stderr=subprocess.STDOUT
+            )
+        except subprocess.CalledProcessError as e:
+            if e.returncode == 1:
+                # No container runtime detected
+                return None
+            else:
+                raise
+        else:
+            return output.decode('utf-8').strip()
 
     def restore_pre_ipa_client_configuration(self, fstore, statestore,
                                              was_sssd_installed,
@@ -268,6 +282,7 @@ class RedHatTaskNamespace(BaseTaskNamespace):
 
         try:
             f = open(new_cacert_path, 'w')
+            os.fchmod(f.fileno(), 0o644)
         except IOError as e:
             logger.info("Failed to open %s: %s", new_cacert_path, e)
             return False
@@ -379,7 +394,7 @@ class RedHatTaskNamespace(BaseTaskNamespace):
         statestore.backup_state('network', 'hostname', old_hostname)
 
     def restore_hostname(self, fstore, statestore):
-        old_hostname = statestore.get_state('network', 'hostname')
+        old_hostname = statestore.restore_state('network', 'hostname')
 
         if old_hostname is not None:
             try:
@@ -403,7 +418,7 @@ class RedHatTaskNamespace(BaseTaskNamespace):
 
             return args
 
-        if not selinux_enabled():
+        if not self.is_selinux_enabled():
             return False
 
         updated_vars = {}
@@ -483,6 +498,36 @@ class RedHatTaskNamespace(BaseTaskNamespace):
 
         os.chmod(paths.GSSPROXY_CONF, 0o600)
         self.restore_context(paths.GSSPROXY_CONF)
+
+    def configure_httpd_wsgi_conf(self):
+        """Configure WSGI for correct Python version (Fedora)
+
+        See https://pagure.io/freeipa/issue/7394
+        """
+        conf = paths.HTTPD_IPA_WSGI_MODULES_CONF
+        if sys.version_info.major == 2:
+            wsgi_module = constants.MOD_WSGI_PYTHON2
+        else:
+            wsgi_module = constants.MOD_WSGI_PYTHON3
+
+        if conf is None or wsgi_module is None:
+            logger.info("Nothing to do for configure_httpd_wsgi_conf")
+            return
+
+        confdir = os.path.dirname(conf)
+        if not os.path.isdir(confdir):
+            os.makedirs(confdir)
+
+        ipautil.copy_template_file(
+            os.path.join(
+                paths.USR_SHARE_IPA_DIR, 'ipa-httpd-wsgi.conf.template'
+            ),
+            conf,
+            dict(WSGI_MODULE=wsgi_module)
+        )
+
+        os.chmod(conf, 0o644)
+        self.restore_context(conf)
 
     def remove_httpd_service_ipa_conf(self):
         """Remove systemd config for httpd service of IPA"""

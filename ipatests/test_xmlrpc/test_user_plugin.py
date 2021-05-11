@@ -25,11 +25,13 @@ Test the `ipaserver/plugins/user.py` module.
 """
 
 import pytest
+import base64
 import datetime
 import ldap
 import re
 
 from ipalib import api, errors
+from ipapython import ipautil
 from ipatests.test_xmlrpc import objectclasses
 from ipatests.util import (
     assert_deepequal, assert_equal, assert_not_equal, raises)
@@ -37,6 +39,7 @@ from ipatests.test_xmlrpc.xmlrpc_test import (
     XMLRPC_test, fuzzy_digits, fuzzy_uuid, fuzzy_password,
     Fuzzy, fuzzy_dergeneralizedtime, add_sid, add_oc, raises_exact)
 from ipapython.dn import DN
+from ipapython.ipaldap import ldap_initialize
 
 from ipatests.test_xmlrpc.tracker.base import Tracker
 from ipatests.test_xmlrpc.tracker.group_plugin import GroupTracker
@@ -68,8 +71,10 @@ invalidlanguages = {
     u'en-us;q=0.1234', u'en-us;q=1.1', u'en-us;q=1.0000'
     }
 
-principal_expiration_string = "2020-12-07T19:54:13Z"
-principal_expiration_date = datetime.datetime(2020, 12, 7, 19, 54, 13)
+now = datetime.datetime.now().replace(microsecond=0)
+principal_expiration_date = now + datetime.timedelta(days=365)
+principal_expiration_string = principal_expiration_date.strftime(
+    "%Y-%m-%dT%H:%M:%SZ")
 
 invalid_expiration_string = "2020-12-07 19:54:13"
 expired_expiration_string = "1991-12-07T19:54:13Z"
@@ -133,6 +138,19 @@ def user_npg2(request, group):
     tracker.attrs.update(
         gidnumber=[u'1000'], description=[], memberof_group=[group.cn],
         objectclass=add_oc(objectclasses.user_base, u'ipantuserattrs')
+    )
+    return tracker.make_fixture(request)
+
+
+@pytest.fixture(scope='class')
+def user_radius(request):
+    """ User tracker fixture for testing users with radius user name """
+    tracker = UserTracker(name=u'radiususer', givenname=u'radiususer',
+                          sn=u'radiususer1',
+                          ipatokenradiususername=u'radiususer')
+    tracker.track_create()
+    tracker.attrs.update(
+        objectclass=objectclasses.user + [u'ipatokenradiusproxyuser']
     )
     return tracker.make_fixture(request)
 
@@ -217,6 +235,36 @@ class TestUser(XMLRPC_test):
             'user_mod', user.uid, **dict(userclass=u'')
         )
         user.check_update(result)
+        user.delete()
+
+    def test_find_cert(self, user):
+        """ Add a usercertificate and perform a user-find --certificate """
+        user_cert = (
+            u"MIICszCCAZugAwIBAgICM24wDQYJKoZIhvcNAQELBQAwIzEUMBIGA1UEChML\r\n"
+            "RVhBTVBMRS5PUkcxCzAJBgNVBAMTAkNBMB4XDTE3MDExOTEwMjUyOVoXDTE3M\r\n"
+            "DQxOTEwMjUyOVowFjEUMBIGA1UEAxMLc3RhZ2V1c2VyLTEwggEiMA0GCSqGSI\r\n"
+            "b3DQEBAQUAA4IBDwAwggEKAoIBAQCq03FRQQBvq4HwYMKP8USLZuOkKzuIs2V\r\n"
+            "Pt8k/+nO1dADrzMogKDiUDjCwYoG2UM/sj6P+PJUUCNDLh5eRRI+aR5VE5y2a\r\n"
+            "K95iCsj1ByDWrugAUXgr8GUUr+UbaGc0XxHCMnQBkYhzbXY3u91KYRRh5l3lx\r\n"
+            "RSICcVeJFJ/tiMS14Vsor1DWykHGz1wm0Zjwg1XDV3oea+uwrSz5Pa6RNPlgC\r\n"
+            "+GGW6B7+8qC2XdSSEwvY7y1SAGgqyOxN/FLwvqqMDNU0uX7fww587uZ57IfYz\r\n"
+            "b8Xn5DAprRFNk40FDc46rMlkPBT+Tij1I0jedD8h2e6WEa7JRU6SGToYDbRm4\r\n"
+            "RL9xAgMBAAEwDQYJKoZIhvcNAQELBQADggEBAHqm1jXzYer9oSjYs9qh1jWpM\r\n"
+            "vTcN+0/z1uuX++Wezh3lG7IzYtypbZNxlXDECyrkUh+9oxzMJqdlZ562ko2br\r\n"
+            "uK6X5csbbM9uVsUva8NCsPPfZXDhrYaMKFvQGFY4pO3uhFGhccob037VN5Ifm\r\n"
+            "aKGM8aJ40cw2PQh38QPDdemizyVCThQ9Pcr+WgWKiG+t2Gd9NldJRLEhky0bW\r\n"
+            "2fc4zWZVbGq5nFXy1k+d/bgkHbVzf255eFZOKKy0NgZwig+uSlhVWPJjS4Z1w\r\n"
+            "LbpBKxTZp/xD0yEARs0u1ZcCELO/BkgQM50EDKmahIM4mdCs/7j1B/DdWs2i3\r\n"
+            "5lnbjxYYiUiyA=")
+        user.ensure_exists()
+        user.update(dict(usercertificate=user_cert),
+                    expected_updates=dict(
+                        usercertificate=[base64.b64decode(user_cert)])
+                    )
+        command = user.make_find_command(uid=user.name,
+                                         usercertificate=user_cert)
+        res = command()['result']
+        assert len(res) == 1
         user.delete()
 
 
@@ -447,6 +495,15 @@ class TestUpdate(XMLRPC_test):
                 error=u'may only include letters, numbers, _, -, . and $')):
             command()
 
+    def test_add_radius_username(self, user):
+        """ Test for ticket 7569: Try to add --radius-username """
+        user.ensure_exists()
+        command = user.make_update_command(
+            updates=dict(ipatokenradiususername=u'radiususer')
+        )
+        command()
+        user.delete()
+
 
 @pytest.mark.tier1
 class TestCreate(XMLRPC_test):
@@ -643,6 +700,32 @@ class TestCreate(XMLRPC_test):
         with raises_exact(errors.ManagedGroupExistsError(group=group.cn)):
             command()
 
+    def test_create_with_username_starting_with_numeric(self):
+        """Successfully create a user with name starting with numeric chars"""
+        testuser = UserTracker(
+            name=u'1234user', givenname=u'First1234', sn=u'Surname1234',
+        )
+        testuser.create()
+        testuser.delete()
+
+    def test_create_with_numeric_only_username(self):
+        """Try to create a user with name only contains numeric chars"""
+        testuser = UserTracker(
+            name=u'1234', givenname=u'NumFirst1234', sn=u'NumSurname1234',
+        )
+        with raises_exact(errors.ValidationError(
+                name=u'login',
+                error=u'may only include letters, numbers, _, -, . and $',
+        )):
+            testuser.create()
+
+    def test_create_with_radius_username(self, user_radius):
+        """Test for issue 7569: try to create a user with --radius-username"""
+        command = user_radius.make_create_command()
+        result = command()
+        user_radius.check_create(result)
+        user_radius.delete()
+
 
 @pytest.mark.tier1
 class TestUserWithGroup(XMLRPC_test):
@@ -700,6 +783,86 @@ class TestUserWithGroup(XMLRPC_test):
         user_npg.run_command(
             'config_mod', **{u'ipadefaultprimarygroup': u'ipausers'}
         )
+
+
+@pytest.mark.tier1
+class TestUserWithUPGDisabled(XMLRPC_test):
+    """ Tests with UPG plugin disabled """
+
+    @classmethod
+    def managed_entries_upg(cls, action='enable'):
+        """ Change the UPG plugin state """
+        assert action in ('enable', 'disable')
+        ipautil.run(['ipa-managed-entries', '-e', 'UPG Definition', action])
+
+    @classmethod
+    def setup_class(cls):
+        super(TestUserWithUPGDisabled, cls).setup_class()
+        cls.managed_entries_upg(action='disable')
+
+    @classmethod
+    def teardown_class(cls):
+        cls.managed_entries_upg(action='enable')
+        super(TestUserWithUPGDisabled, cls).teardown_class()
+
+    def test_create_without_upg(self):
+        """ Try to create user without User's Primary GID
+
+        As the UPG plugin is disabled, the user gets assigned to the Default
+        Group for new users (ipausers) which is not POSIX and the command
+        is expected to fail
+        """
+        testuser = UserTracker(
+            name=u'tuser1', givenname=u'Test', sn=u'Tuser1'
+        )
+        command = testuser.make_create_command()
+        with raises_exact(errors.NotFound(
+                reason=u'Default group for new users is not POSIX')):
+            command()
+
+    def test_create_without_upg_with_gid_set(self):
+        """ Create user without User's Primary GID with GID set
+
+        The UPG plugin is disabled, but the user is provided with a group
+        """
+        testuser = UserTracker(
+            name=u'tuser1', givenname=u'Test', sn=u'Tuser1',
+            gidnumber=1000
+        )
+        testuser.track_create()
+        del testuser.attrs['mepmanagedentry']
+        testuser.attrs.update(gidnumber=[u'1000'])
+        testuser.attrs.update(
+            description=[],
+            objectclass=add_oc(objectclasses.user_base, u'ipantuserattrs')
+        )
+        command = testuser.make_create_command()
+        result = command()
+        testuser.check_create(result, [u'description'])
+        testuser.delete()
+
+    def test_create_where_managed_group_exists(self, user, group):
+        """ Create a managed group and then try to create user
+        with the same name the group has
+
+        As the UPG plugin is disabled, there is no conflict
+        """
+        group.create()
+        testuser = UserTracker(
+            name=group.cn, givenname=u'Test', sn=u'Tuser1',
+            gidnumber=1000
+        )
+        testuser.track_create()
+        del testuser.attrs['mepmanagedentry']
+        testuser.attrs.update(gidnumber=[u'1000'])
+        testuser.attrs.update(
+            description=[],
+            objectclass=add_oc(objectclasses.user_base, u'ipantuserattrs')
+        )
+        command = testuser.make_create_command()
+        result = command()
+        testuser.check_create(result, [u'description'])
+        testuser.delete()
 
 
 @pytest.mark.tier1
@@ -913,8 +1076,9 @@ class TestDeniedBindWithExpiredPrincipal(XMLRPC_test):
     def setup_class(cls):
         super(TestDeniedBindWithExpiredPrincipal, cls).setup_class()
 
-        cls.connection = ldap.initialize('ldap://{host}'
-                                         .format(host=api.env.host))
+        cls.connection = ldap_initialize(
+            'ldap://{host}'.format(host=api.env.host)
+        )
 
     @classmethod
     def teardown_class(cls):

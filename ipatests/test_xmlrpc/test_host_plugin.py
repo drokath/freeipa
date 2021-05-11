@@ -22,7 +22,7 @@
 """
 Test the `ipalib.plugins.host` module.
 """
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 
 import os
 import tempfile
@@ -31,7 +31,7 @@ import base64
 import pytest
 
 from ipapython import ipautil
-from ipalib import api, errors
+from ipalib import api, errors, messages
 from ipapython.dn import DN
 from ipapython.dnsutil import DNSName
 from ipatests.test_util import yield_fixture
@@ -100,6 +100,9 @@ hostgroup1_dn = DN(('cn',hostgroup1),('cn','hostgroups'),('cn','accounts'),
 host_cert = get_testcert(DN(('CN', api.env.host), subject_base()),
                          'host/%s@%s' % (api.env.host, api.env.realm))
 
+missingrevzone = u'22.30.16.172.in-addr.arpa.'
+ipv4_in_missingrevzone_ip = u'172.16.30.22'
+
 
 @pytest.fixture(scope='class')
 def host(request):
@@ -116,6 +119,18 @@ def host2(request):
 @pytest.fixture(scope='class')
 def host3(request):
     tracker = HostTracker(name=u'testhost3')
+    return tracker.make_fixture(request)
+
+
+@pytest.fixture(scope='class')
+def host4(request):
+    tracker = HostTracker(name=u'testhost4')
+    return tracker.make_fixture(request)
+
+
+@pytest.fixture(scope='class')
+def host5(request):
+    tracker = HostTracker(name=u'testhost5')
     return tracker.make_fixture(request)
 
 
@@ -242,6 +257,34 @@ class TestCRUD(XMLRPC_test):
                         valid_not_after=fuzzy_date,
                     ))
         host.retrieve()
+        # test host-find with --certificate
+        command = host.make_find_command(
+            fqdn=host.fqdn, usercertificate=host_cert)
+        res = command()['result']
+        assert len(res) == 1
+
+    def test_host_find_pkey_only(self, host5):
+        # test host-find with --pkey-only
+        host5.ensure_exists()
+        command = host5.make_create_command(force=True)
+        host5.update(dict(ipasshpubkey=sshpubkey),
+                     expected_updates=dict(
+                         description=[u'Test host <testhost5>'],
+                         fqdn=[host5.fqdn],
+                         ipasshpubkey=[sshpubkey],
+                         has_keytab=False,
+                         has_password=False,
+                         krbprincipalname=[u'host/%s@%s' %
+                                           (host5.fqdn, api.env.realm)],
+                         krbcanonicalname=[u'host/%s@%s' %
+                                           (host5.fqdn, api.env.realm)],
+                         managedby_host=[host5.fqdn],
+                         sshpubkeyfp=[sshpubkeyfp], ))
+        command = host5.make_find_command(
+            fqdn=host5.fqdn, pkey_only=True)
+        result = command()['result']
+        for item in result:
+            assert 'ipasshpubkey' not in item.keys()
 
     def test_try_rename(self, host):
         host.ensure_exists()
@@ -588,6 +631,98 @@ class TestHostFalsePwdChange(XMLRPC_test):
         command = host.make_update_command(updates=dict(random=True))
         with pytest.raises(errors.ValidationError):
             command()
+
+
+@yield_fixture(scope='class')
+def dns_setup_nonameserver(host4):
+    # Make sure that the server does not handle the reverse zone used
+    # for the test
+    try:
+        host4.run_command('dnszone_del', missingrevzone, **{'continue': True})
+    except (errors.NotFound, errors.EmptyModlist):
+        pass
+
+    # Save the current forward policy
+    result = host4.run_command('dnsserver_show', api.env.host)
+    current_fwd_pol = result['result']['idnsforwardpolicy'][0]
+
+    # Configure the forward policy to none to make sure that no DNS
+    # server will answer for the reverse zone either
+    try:
+        host4.run_command('dnsserver_mod', api.env.host,
+                          idnsforwardpolicy=u'none')
+    except errors.EmptyModlist:
+        pass
+
+    try:
+        yield
+    finally:
+        # Restore the previous forward-policy
+        try:
+            host4.run_command('dnsserver_mod', api.env.host,
+                              idnsforwardpolicy=current_fwd_pol)
+        except errors.EmptyModlist:
+            pass
+
+
+@pytest.mark.tier1
+class TestHostNoNameserversForRevZone(XMLRPC_test):
+    def test_create_host_with_ip(self, dns_setup_nonameserver, host4):
+        """
+        Regression test for ticket 7397
+
+        Configure the master with forward-policy = none to make sure
+        that no DNS server will answer for the reverse zone
+        Try to add a new host with an IP address in the missing reverse
+        zone.
+        With issue 7397, a NoNameserver exception generates a Traceback in
+        httpd error_log, and the command returns an InternalError.
+        """
+        try:
+            command = host4.make_create_command()
+            result = command(ip_address=ipv4_in_missingrevzone_ip)
+            msg = result['messages'][0]
+            assert msg['code'] == messages.FailedToAddHostDNSRecords.errno
+            expected = "The host was added but the DNS update failed"
+            # Either one of:
+            # All nameservers failed to answer the query for DNS reverse zone
+            # DNS reverse zone ... is not managed by this server
+            assert expected in msg['message']
+            # Make sure the host is added
+            host4.run_command('host_show', host4.fqdn)
+        finally:
+            # Delete the host entry
+            command = host4.make_delete_command()
+            try:
+                command(updatedns=True)
+            except errors.NotFound:
+                pass
+
+    def test_create_host_with_otp(self, dns_setup_nonameserver, host4):
+        """
+        Create a test host specifying an IP address for which
+        IPA does not handle the reverse zone, and requesting
+        the creation of a random password.
+        Non-reg test for ticket 7374.
+        """
+
+        command = host4.make_create_command()
+        try:
+            result = command(random=True, ip_address=ipv4_in_missingrevzone_ip)
+            # Make sure a random password is returned
+            assert result['result']['randompassword']
+            # Make sure the warning about missing DNS record is added
+            msg = result['messages'][0]
+            assert msg['code'] == messages.FailedToAddHostDNSRecords.errno
+            assert msg['message'].startswith(
+                u'The host was added but the DNS update failed with:')
+        finally:
+            # Cleanup
+            try:
+                command = host4.make_delete_command()
+                command(updatedns=True)
+            except errors.NotFound:
+                pass
 
 
 @yield_fixture(scope='class')

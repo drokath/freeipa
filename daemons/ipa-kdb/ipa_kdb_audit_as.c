@@ -20,7 +20,6 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <syslog.h>
 #include "ipa_kdb.h"
 #include "ipa_pwd.h"
 
@@ -111,13 +110,13 @@ void ipadb_audit_as_req(krb5_context kcontext,
         }
 
         if (client->last_failed + ied->pol->lockout_duration > authtime &&
-            (client->fail_auth_count >= ied->pol->max_fail && 
+            (client->fail_auth_count >= (krb5_kvno) ied->pol->max_fail && 
              ied->pol->max_fail != 0)) {
             /* client already locked, nothing more to do */
             break;
         }
         if (ied->pol->max_fail == 0 ||
-            client->fail_auth_count < ied->pol->max_fail) {
+            client->fail_auth_count < (krb5_kvno) ied->pol->max_fail) {
             /* let's increase the fail counter */
             client->fail_auth_count++;
             client->mask |= KMASK_FAIL_AUTH_COUNT;

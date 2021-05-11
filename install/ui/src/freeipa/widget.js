@@ -3109,7 +3109,7 @@ IPA.boolean_status_formatter = function(spec) {
     that.format = function(value) {
         var icon_cls = value ? that.enabled_icon : that.disabled_icon;
         var formatted_value = that.boolean_formatter_format(value);
-        formatted_value = '<i class=\"'+icon_cls+'\"/> '+formatted_value;
+        formatted_value = '<i class=\"'+icon_cls+'\"></i> '+formatted_value;
         return formatted_value;
     };
 
@@ -5013,7 +5013,7 @@ IPA.entity_select_widget = function(spec) {
             method: 'find',
             args: [filter],
             options: that.filter_options,
-            suppress_warnings: [13017]
+            suppress_warnings: [rpc.errors.search_result_truncated]
         });
         var no_members = metadata.get('@mc-opt:' + cmd.get_command() + ':no_members');
         if (no_members) {
@@ -5186,10 +5186,17 @@ IPA.link_widget = function(spec) {
 
         if (that.no_check) return;
 
+        var pkeys = that.other_pkeys();
+
+        if (pkeys.length === 0) {
+            that.is_link = false;
+            return;
+        }
+
         rpc.command({
             entity: that.other_entity.name,
             method: 'show',
-            args: that.other_pkeys(),
+            args: pkeys,
             options: {},
             retry: false,
             on_success: function(data) {

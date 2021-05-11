@@ -2,7 +2,7 @@
 # Copyright (C) 2015  FreeIPA Contributors see COPYING for license
 #
 
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 
 import contextlib
 import logging
@@ -14,7 +14,9 @@ import dns.reversename as dnsreversename
 import os
 import shutil
 import socket
+import sys
 import tempfile
+import textwrap
 import traceback
 
 from pkg_resources import parse_version
@@ -40,9 +42,11 @@ from ipaserver.install import (
     installutils, kra, krbinstance,
     ntpinstance, otpdinstance, custodiainstance, service)
 from ipaserver.install.installutils import (
-    create_replica_config, ReplicaConfig, load_pkcs12, is_ipa_configured)
+    create_replica_config, ReplicaConfig, load_pkcs12, is_ipa_configured,
+    validate_mask)
 from ipaserver.install.replication import (
     ReplicationManager, replica_conn_check)
+from ipaserver.masters import find_providing_servers, find_providing_server
 import SSSDConfig
 from subprocess import CalledProcessError
 
@@ -77,7 +81,7 @@ def make_pkcs12_info(directory, cert_name, password_name):
 
 
 def install_replica_ds(config, options, ca_is_configured, remote_api,
-                       ca_file, promote=False, pkcs12_info=None):
+                       ca_file, promote=False, pkcs12_info=None, fstore=None):
     dsinstance.check_ports()
 
     # if we have a pkcs12 file, create the cert db from
@@ -93,7 +97,8 @@ def install_replica_ds(config, options, ca_is_configured, remote_api,
         ca_subject = installutils.default_ca_subject_dn(config.subject_base)
 
     ds = dsinstance.DsInstance(
-        config_ldif=options.dirsrv_config_file)
+        config_ldif=options.dirsrv_config_file,
+        fstore=fstore)
     ds.create_replica(
         realm_name=config.realm_name,
         master_fqdn=config.master_host_name,
@@ -113,8 +118,9 @@ def install_replica_ds(config, options, ca_is_configured, remote_api,
     return ds
 
 
-def install_krb(config, setup_pkinit=False, pkcs12_info=None, promote=False):
-    krb = krbinstance.KrbInstance()
+def install_krb(config, setup_pkinit=False, pkcs12_info=None, promote=False,
+                fstore=None):
+    krb = krbinstance.KrbInstance(fstore=fstore)
 
     # pkinit files
     if pkcs12_info is None:
@@ -143,7 +149,7 @@ def install_ca_cert(ldap, base_dn, realm, cafile, destfile=paths.IPA_CA_CRT):
                 pass
         else:
             certs = [c[0] for c in certs if c[2] is not False]
-            x509.write_certificate_list(certs, destfile)
+            x509.write_certificate_list(certs, destfile, mode=0o644)
     except Exception as e:
         raise ScriptError("error copying files: " + str(e))
     return destfile
@@ -151,7 +157,8 @@ def install_ca_cert(ldap, base_dn, realm, cafile, destfile=paths.IPA_CA_CRT):
 
 def install_http(config, auto_redirect, ca_is_configured, ca_file,
                  promote=False,
-                 pkcs12_info=None):
+                 pkcs12_info=None,
+                 fstore=None):
     # if we have a pkcs12 file, create the cert db from
     # that. Otherwise the ds setup will create the CA
     # cert
@@ -159,8 +166,7 @@ def install_http(config, auto_redirect, ca_is_configured, ca_file,
         pkcs12_info = make_pkcs12_info(config.dir, "httpcert.p12",
                                        "http_pin.txt")
 
-
-    http = httpinstance.HTTPInstance()
+    http = httpinstance.HTTPInstance(fstore=fstore)
     http.create_instance(
         config.realm_name, config.host_name, config.domain_name,
         config.dirman_password, pkcs12_info,
@@ -171,14 +177,14 @@ def install_http(config, auto_redirect, ca_is_configured, ca_file,
     return http
 
 
-def install_dns_records(config, options, remote_api):
+def install_dns_records(config, options, remote_api, fstore=None):
 
     if not bindinstance.dns_container_exists(
             ipautil.realm_to_suffix(config.realm_name)):
         return
 
     try:
-        bind = bindinstance.BindInstance(api=remote_api)
+        bind = bindinstance.BindInstance(api=remote_api, fstore=fstore)
         for ip in config.ips:
             reverse_zone = bindinstance.find_reverse_zone(ip, remote_api)
 
@@ -197,7 +203,16 @@ def install_dns_records(config, options, remote_api):
                     'on master: %s', str(e))
 
 
-def create_ipa_conf(fstore, config, ca_enabled):
+def create_ipa_conf(fstore, config, ca_enabled, master=None):
+    """
+    Create /etc/ipa/default.conf master configuration
+    :param fstore: sysrestore file store used for backup and restore of
+                   the server configuration
+    :param config: replica config
+    :param ca_enabled: True if the topology includes a CA
+    :param master: if set, the xmlrpc_uri parameter will use the provided
+                   master instead of this host
+    """
     # Save client file on Domain Level 1
     target_fname = paths.IPA_DEFAULT_CONF
     fstore.backup_file(target_fname)
@@ -206,8 +221,12 @@ def create_ipa_conf(fstore, config, ca_enabled):
     ipaconf.setOptionAssignment(" = ")
     ipaconf.setSectionNameDelimiters(("[", "]"))
 
-    xmlrpc_uri = 'https://{0}/ipa/xml'.format(
-                    ipautil.format_netloc(config.host_name))
+    if master:
+        xmlrpc_uri = 'https://{0}/ipa/xml'.format(
+            ipautil.format_netloc(master))
+    else:
+        xmlrpc_uri = 'https://{0}/ipa/xml'.format(
+                        ipautil.format_netloc(config.host_name))
     ldapi_uri = 'ldapi://%2fvar%2frun%2fslapd-{0}.socket\n'.format(
                     installutils.realm_to_serverid(config.realm_name))
 
@@ -231,6 +250,7 @@ def create_ipa_conf(fstore, config, ca_enabled):
 
         if not config.setup_ca:
             gopts.append(ipaconf.setOption('ca_host', config.ca_host_name))
+
     else:
         gopts.extend([
             ipaconf.setOption('enable_ra', 'False'),
@@ -480,7 +500,7 @@ def promote_openldap_conf(hostname, master):
         for opt in old_opts:
             if opt['type'] == 'comment' and master in opt['value']:
                 continue
-            elif (opt['type'] == 'option' and opt['name'] == 'URI' and
+            if (opt['type'] == 'option' and opt['name'] == 'URI' and
                     master in opt['value']):
                 continue
             new_opts.append(opt)
@@ -556,6 +576,11 @@ def check_remote_version(client, local_version):
 def common_check(no_ntp):
     tasks.check_ipv6_stack_enabled()
     tasks.check_selinux_status()
+
+    mask_str = validate_mask()
+    if mask_str:
+        raise ScriptError(
+            "Unexpected system mask: %s, expected 0022" % mask_str)
 
     if is_ipa_configured():
         raise ScriptError(
@@ -789,8 +814,12 @@ def install_check(installer):
         check_domain_level_is_supported(domain_level)
         if domain_level != constants.DOMAIN_LEVEL_0:
             raise RuntimeError(
-                "You must provide a file generated by ipa-replica-prepare to "
-                "create a replica when the domain is at level 0."
+                "You used the wrong mechanism to install a replica in "
+                "domain level {dl}:\n"
+                "\tFor domain level >= 1 replica installation, first join the "
+                "domain by running ipa-client-install, then run "
+                "ipa-replica-install without a replica file."
+                .format(dl=domain_level)
             )
 
         # Check pre-existing host entry
@@ -931,6 +960,10 @@ def ensure_enrolled(installer):
         args.append("--mkhomedir")
     if installer.force_join:
         args.append("--force-join")
+    if installer.ip_addresses:
+        for ip in installer.ip_addresses:
+            # installer.ip_addresses is of type [CheckedIPAddress]
+            args.extend(("--ip-address", str(ip)))
 
     try:
         # Call client install script
@@ -980,6 +1013,10 @@ def promote_check(installer):
 
     client_fstore = sysrestore.FileStore(paths.IPA_CLIENT_SYSRESTORE)
     if not client_fstore.has_files():
+        # One-step replica installation
+        if options.password and options.admin_password:
+            raise ScriptError("--password and --admin-password options are "
+                              "mutually exclusive")
         ensure_enrolled(installer)
     else:
         if (options.domain_name or options.server or options.realm_name or
@@ -987,6 +1024,8 @@ def promote_check(installer):
             print("IPA client is already configured on this system, ignoring "
                   "the --domain, --server, --realm, --hostname, --password "
                   "and --keytab options.")
+            # Make sure options.server is not used
+            options.server = None
 
     sstore = sysrestore.StateFile(paths.SYSRESTORE)
 
@@ -1011,13 +1050,19 @@ def promote_check(installer):
     config.host_name = api.env.host
     config.domain_name = api.env.domain
     config.master_host_name = api.env.server
-    config.ca_host_name = api.env.ca_host
+    if not api.env.ca_host or api.env.ca_host == api.env.host:
+        # ca_host has not been configured explicitly, prefer source master
+        config.ca_host_name = api.env.server
+    else:
+        # default to ca_host from IPA config
+        config.ca_host_name = api.env.ca_host
     config.kra_host_name = config.ca_host_name
     config.ca_ds_port = 389
     config.setup_ca = options.setup_ca
     config.setup_kra = options.setup_kra
     config.dir = installer._top_dir
     config.basedn = api.env.basedn
+    config.hidden_replica = options.hidden_replica
 
     http_pkcs12_file = None
     http_pkcs12_info = None
@@ -1033,7 +1078,7 @@ def promote_check(installer):
         if options.http_pin is None:
             options.http_pin = installutils.read_password(
                 "Enter Apache Server private key unlock",
-                confirm=False, validate=False)
+                confirm=False, validate=False, retry=False)
             if options.http_pin is None:
                 raise ScriptError(
                     "Apache Server private key unlock password required")
@@ -1049,7 +1094,7 @@ def promote_check(installer):
         if options.dirsrv_pin is None:
             options.dirsrv_pin = installutils.read_password(
                 "Enter Directory Server private key unlock",
-                confirm=False, validate=False)
+                confirm=False, validate=False, retry=False)
             if options.dirsrv_pin is None:
                 raise ScriptError(
                     "Directory Server private key unlock password required")
@@ -1065,7 +1110,7 @@ def promote_check(installer):
         if options.pkinit_pin is None:
             options.pkinit_pin = installutils.read_password(
                 "Enter Kerberos KDC private key unlock",
-                confirm=False, validate=False)
+                confirm=False, validate=False, retry=False)
             if options.pkinit_pin is None:
                 raise ScriptError(
                     "Kerberos KDC private key unlock password required")
@@ -1091,7 +1136,11 @@ def promote_check(installer):
                            "certificate")
 
     installutils.verify_fqdn(config.host_name, options.no_host_dns)
-    installutils.verify_fqdn(config.master_host_name, options.no_host_dns)
+    # Inside the container environment master's IP address does not
+    # resolve to its name. See https://pagure.io/freeipa/issue/6210
+    container_environment = tasks.detect_container() is not None
+    installutils.verify_fqdn(config.master_host_name, options.no_host_dns,
+                             local_hostname=not container_environment)
 
     ccache = os.environ['KRB5CCNAME']
     kinit_keytab('host/{env.host}@{env.realm}'.format(env=api.env),
@@ -1133,12 +1182,8 @@ def promote_check(installer):
         check_domain_level_is_supported(domain_level)
         if domain_level < constants.DOMAIN_LEVEL_1:
             raise RuntimeError(
-                "You used the wrong mechanism to install a replica in "
-                "domain level {dl}:\n"
-                "\tFor domain level >= 1 replica installation, first join the "
-                "domain by running ipa-client-install, then run "
-                "ipa-replica-install without a replica file."
-                .format(dl=domain_level)
+                "You must provide a file generated by ipa-replica-prepare to "
+                "create a replica when the domain is at level 0."
             )
 
         # Check authorization
@@ -1225,9 +1270,17 @@ def promote_check(installer):
         if subject_base is not None:
             config.subject_base = DN(subject_base)
 
-        # Find if any server has a CA
-        ca_host = service.find_providing_server(
-                'CA', conn, config.ca_host_name)
+        # Find any server with a CA
+        # The order of preference is
+        # 1. the first server specified in --server, if any
+        # 2. the server specified in the config file
+        # 3. any other
+        preferred_cas = [config.ca_host_name]
+        if options.server:
+            preferred_cas.insert(0, options.server)
+        ca_host = find_providing_server(
+            'CA', conn, preferred_cas
+        )
         if ca_host is not None:
             config.ca_host_name = ca_host
             ca_enabled = True
@@ -1235,6 +1288,14 @@ def promote_check(installer):
                 logger.error("Certificates could not be provided when "
                              "CA is present on some master.")
                 raise ScriptError(rval=3)
+            if options.setup_ca and options.server and \
+               ca_host != options.server:
+                # Installer was provided with a specific master
+                # but this one doesn't provide CA
+                logger.error("The specified --server %s does not provide CA, "
+                             "please provide a server with the CA role",
+                             options.server)
+                raise ScriptError(rval=4)
         else:
             if options.setup_ca:
                 logger.error("The remote master does not have a CA "
@@ -1248,14 +1309,31 @@ def promote_check(installer):
                              "custom certificates.")
                 raise ScriptError(rval=3)
 
-        kra_host = service.find_providing_server(
-                'KRA', conn, config.kra_host_name)
+        # Find any server with a KRA
+        # The order of preference is
+        # 1. the first server specified in --server, if any
+        # 2. the server specified in the config file
+        # 3. any other
+        preferred_kras = [config.kra_host_name]
+        if options.server:
+            preferred_kras.insert(0, options.server)
+        kra_host = find_providing_server(
+            'KRA', conn, preferred_kras
+        )
         if kra_host is not None:
             config.kra_host_name = kra_host
             kra_enabled = True
+            if options.setup_kra and options.server and \
+               kra_host != options.server:
+                # Installer was provided with a specific master
+                # but this one doesn't provide KRA
+                logger.error("The specified --server %s does not provide KRA, "
+                             "please provide a server with the KRA role",
+                             options.server)
+                raise ScriptError(rval=4)
         else:
             if options.setup_kra:
-                logger.error("There is no KRA server in the domain, "
+                logger.error("There is no active KRA server in the domain, "
                              "can't setup a KRA clone")
                 raise ScriptError(rval=3)
             kra_enabled = False
@@ -1345,6 +1423,7 @@ def install(installer):
     fstore = installer._fstore
     sstore = installer._sstore
     config = installer._config
+    config.promote = installer.promote
     promote = installer.promote
     cafile = installer._ca_file
     dirsrv_pkcs12_info = installer._dirsrv_pkcs12_info
@@ -1404,10 +1483,11 @@ def install(installer):
                                 remote_api,
                                 ca_file=cafile,
                                 promote=promote,
-                                pkcs12_info=dirsrv_pkcs12_info)
+                                pkcs12_info=dirsrv_pkcs12_info,
+                                fstore=fstore)
 
         # Always try to install DNS records
-        install_dns_records(config, options, remote_api)
+        install_dns_records(config, options, remote_api, fstore=fstore)
 
         ntpinstance.ntp_ldap_enable(config.host_name, ds.suffix,
                                     remote_api.env.realm)
@@ -1428,7 +1508,27 @@ def install(installer):
         config,
         setup_pkinit=not options.no_pkinit,
         pkcs12_info=pkinit_pkcs12_info,
-        promote=promote)
+        promote=promote,
+        fstore=fstore)
+
+    if promote:
+        # We need to point to the master when certmonger asks for
+        # a DS or HTTP certificate.
+        # During http installation, the <service>/hostname principal is
+        # created locally then the installer waits for the entry to appear
+        # on the master selected for the installation.
+        # In a later step, the installer requests a SSL certificate through
+        # Certmonger (and the op adds the principal if it does not exist yet).
+        # If xmlrpc_uri points to the soon-to-be replica,
+        # the httpd service is not ready yet to handle certmonger requests
+        # and certmonger tries to find another master. The master can be
+        # different from the one selected for the installation, and it is
+        # possible that the principal has not been replicated yet. This
+        # may lead to a replication conflict.
+        # This is why we need to force the use of the same master by
+        # setting xmlrpc_uri
+        create_ipa_conf(fstore, config, ca_enabled,
+                        master=config.master_host_name)
 
     # we now need to enable ssl on the ds
     ds.enable_ssl()
@@ -1439,25 +1539,33 @@ def install(installer):
         promote=promote,
         pkcs12_info=http_pkcs12_info,
         ca_is_configured=ca_enabled,
-        ca_file=cafile)
+        ca_file=cafile,
+        fstore=fstore)
+
+    if promote:
+        # Need to point back to ourself after the cert for HTTP is obtained
+        create_ipa_conf(fstore, config, ca_enabled)
 
     otpd = otpdinstance.OtpdInstance()
     otpd.create_instance('OTPD', config.host_name,
                          ipautil.realm_to_suffix(config.realm_name))
 
-    custodia = custodiainstance.CustodiaInstance(config.host_name,
-                                                 config.realm_name)
-    if promote:
-        custodia.create_replica(config.master_host_name)
+    if kra_enabled:
+        # A KRA peer always provides a CA, too.
+        mode = custodiainstance.CustodiaModes.KRA_PEER
+    elif ca_enabled:
+        mode = custodiainstance.CustodiaModes.CA_PEER
     else:
-        custodia.create_instance()
+        mode = custodiainstance.CustodiaModes.MASTER_PEER
+    custodia = custodiainstance.get_custodia_instance(config, mode)
+    custodia.create_instance()
 
     if ca_enabled:
         options.realm_name = config.realm_name
         options.domain_name = config.domain_name
         options.host_name = config.host_name
         options.dm_password = config.dirman_password
-        ca.install(False, config, options)
+        ca.install(False, config, options, custodia=custodia)
 
     # configure PKINIT now that all required services are in place
     krb.enable_ssl()
@@ -1465,27 +1573,25 @@ def install(installer):
     # Apply any LDAP updates. Needs to be done after the replica is synced-up
     service.print_msg("Applying LDAP updates")
     ds.apply_updates()
+    service.print_msg("Finalize replication settings")
+    ds.finalize_replica_config()
 
     if kra_enabled:
-        kra.install(api, config, options)
+        kra.install(api, config, options, custodia=custodia)
 
     service.print_msg("Restarting the KDC")
     krb.restart()
 
     if promote:
-        custodia.import_dm_password(config.master_host_name)
+        custodia.import_dm_password()
         promote_sssd(config.host_name)
         promote_openldap_conf(config.host_name, config.master_host_name)
 
     if options.setup_dns:
         dns.install(False, True, options, api)
-    else:
-        api.Command.dns_update_system_records()
 
     if options.setup_adtrust:
         adtrust.install(False, options, fstore, api)
-
-    api.Backend.ldap2.disconnect()
 
     if not promote:
         # Call client install script
@@ -1514,8 +1620,31 @@ def install(installer):
         # remove the extracted replica file
         remove_replica_info_dir(installer)
 
+    # Enable configured services and update DNS SRV records
+    if options.hidden_replica:
+        # Set services to hidden
+        service.hide_services(config.host_name)
+    else:
+        # Enable configured services
+        service.enable_services(config.host_name)
+    # update DNS SRV records. Although it's only really necessary in
+    # enabled-service case, also perform update in hidden replica case.
+    api.Command.dns_update_system_records()
+
+    ca_servers = find_providing_servers('CA', api.Backend.ldap2, api=api)
+    api.Backend.ldap2.disconnect()
+
     # Everything installed properly, activate ipa service.
     services.knownservices.ipa.enable()
+
+    # Print a warning if CA role is only installed on one server
+    if len(ca_servers) == 1:
+        msg = textwrap.dedent(u'''
+            WARNING: The CA service is only installed on one server ({}).
+            It is strongly recommended to install it on another server.
+            Run ipa-ca-install(1) on another master to accomplish this.
+        '''.format(ca_servers[0]))
+        print(msg, file=sys.stderr)
 
 
 def init(installer):

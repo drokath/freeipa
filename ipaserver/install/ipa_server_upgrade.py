@@ -2,6 +2,8 @@
 # Copyright (C) 2015  FreeIPA Contributors see COPYING for license
 #
 
+from __future__ import absolute_import
+
 import logging
 
 from ipalib import api
@@ -32,6 +34,8 @@ class ServerUpgrade(admintool.AdminTool):
 
     def validate_options(self):
         super(ServerUpgrade, self).validate_options(needs_root=True)
+
+        installutils.check_server_configuration()
 
         if self.options.force:
             self.options.skip_version_check = True

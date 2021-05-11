@@ -17,6 +17,8 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+from __future__ import absolute_import
+
 import logging
 
 import gssapi
@@ -348,7 +350,7 @@ class WinsyncMigrate(admintool.AdminTool):
         # Check if the IPA server is configured before attempting to migrate
         try:
             installutils.check_server_configuration()
-        except RuntimeError as e:
+        except admintool.ScriptError as e:
             sys.exit(e)
 
         # Finalize API

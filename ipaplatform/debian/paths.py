@@ -8,6 +8,8 @@ in Debian-based systems.
 """
 
 # Fallback to default path definitions
+from __future__ import absolute_import
+
 from ipaplatform.base.paths import BasePathNamespace
 import sysconfig
 
@@ -53,6 +55,7 @@ class DebianPathNamespace(BasePathNamespace):
     SYSCONFIG_PKI = "/etc/dogtag/"
     SYSCONFIG_PKI_TOMCAT = "/etc/default/pki-tomcat"
     SYSCONFIG_PKI_TOMCAT_PKI_TOMCAT_DIR = "/etc/dogtag/tomcat/pki-tomcat"
+    BIN_TOMCAT = "/usr/share/tomcat9/bin/version.sh"
     SYSTEMD_SYSTEM_HTTPD_D_DIR = "/etc/systemd/system/apache2.service.d/"
     SYSTEMD_SYSTEM_HTTPD_IPA_CONF = "/etc/systemd/system/apache2.service.d/ipa.conf"
     DNSSEC_TRUSTED_KEY = "/etc/bind/trusted-key.key"

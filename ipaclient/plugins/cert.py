@@ -23,12 +23,11 @@ import base64
 
 import six
 
-from ipaclient import csrgen
 from ipaclient.frontend import MethodOverride
 from ipalib import errors
 from ipalib import x509
 from ipalib import util
-from ipalib.parameters import File, Flag, Str
+from ipalib.parameters import BinaryFile, File, Flag, Str
 from ipalib.plugable import Registry
 from ipalib.text import _
 
@@ -65,9 +64,8 @@ class CertRetrieveOverride(MethodOverride):
             if options.get('chain', False):
                 certs = result['result']['certificate_chain']
             else:
-                certs = [result['result']['certificate']]
-            certs = (x509.load_der_x509_certificate(base64.b64decode(cert))
-                     for cert in certs)
+                certs = [base64.b64decode(result['result']['certificate'])]
+            certs = (x509.load_der_x509_certificate(cert) for cert in certs)
             x509.write_certificate_list(certs, certificate_out)
 
         return result
@@ -111,10 +109,15 @@ class cert_request(CertRetrieveOverride):
         password_file = options.pop('password_file', None)
 
         if csr is None:
+            # Deferred import, ipaclient.csrgen is expensive to load.
+            # see https://pagure.io/freeipa/issue/7484
+            from ipaclient import csrgen
+
             if database:
                 adaptor = csrgen.NSSAdaptor(database, password_file)
             elif private_key:
-                adaptor = csrgen.OpenSSLAdaptor(private_key, password_file)
+                adaptor = csrgen.OpenSSLAdaptor(
+                    key_filename=private_key, password_filename=password_file)
             else:
                 raise errors.InvocationError(
                     message=u"One of 'database' or 'private_key' is required")
@@ -192,7 +195,7 @@ class cert_remove_hold(MethodOverride):
 @register(override=True, no_fail=True)
 class cert_find(MethodOverride):
     takes_options = (
-        File(
+        BinaryFile(
             'file?',
             label=_("Input filename"),
             doc=_('File to load the certificate from.'),

@@ -17,29 +17,37 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+from __future__ import absolute_import
+
 import base64
 import logging
+import time
 
 import ldap
 import os
 import shutil
 import traceback
 import dbus
+import re
+import pwd
+import lxml.etree
 
 from pki.client import PKIConnection
 import pki.system
 
 from ipalib import api, errors, x509
 from ipalib.install import certmonger
-from ipalib.constants import CA_DBUS_TIMEOUT
+from ipalib.constants import CA_DBUS_TIMEOUT, RENEWAL_CA_NAME
 from ipaplatform import services
 from ipaplatform.constants import constants
 from ipaplatform.paths import paths
+from ipaplatform.tasks import tasks
 from ipapython import ipaldap
 from ipapython import ipautil
 from ipapython.dn import DN
 from ipaserver.install import service
 from ipaserver.install import installutils
+from ipaserver.install import sysupgrade
 from ipaserver.install import replication
 from ipaserver.install.installutils import stopped_service
 
@@ -88,6 +96,16 @@ class DogtagInstance(service.Service):
     tracking_reqs = None
     server_cert_name = None
 
+    ipaca_groups = DN(('ou', 'groups'), ('o', 'ipaca'))
+    ipaca_people = DN(('ou', 'people'), ('o', 'ipaca'))
+    groups_aci = (
+        b'(targetfilter="(objectClass=groupOfUniqueNames)")'
+        b'(targetattr="cn || description || objectclass || uniquemember")'
+        b'(version 3.0; acl "Allow users from o=ipaca to read groups"; '
+        b'allow (read, search, compare) '
+        b'userdn="ldap:///uid=*,ou=people,o=ipaca";)'
+    )
+
     def __init__(self, realm, subsystem, service_desc, host_name=None,
                  nss_db=paths.PKI_TOMCAT_ALIAS_DIR, service_prefix=None,
                  config=None):
@@ -106,10 +124,11 @@ class DogtagInstance(service.Service):
         self.pkcs12_info = None
         self.clone = False
 
-        self.basedn = DN(('o', 'ipa%s' % subsystem.lower()))
+        self.basedn = DN(('o', 'ipaca'))
         self.admin_user = "admin"
-        self.admin_dn = DN(('uid', self.admin_user),
-                           ('ou', 'people'), ('o', 'ipaca'))
+        self.admin_dn = DN(
+            ('uid', self.admin_user), self.ipaca_people
+        )
         self.admin_groups = None
         self.tmp_agent_db = None
         self.subsystem = subsystem
@@ -121,14 +140,22 @@ class DogtagInstance(service.Service):
         self.nss_db = nss_db
         self.config = config  # Path to CS.cfg
 
+        self.ajp_secret = None
+
     def is_installed(self):
         """
         Determine if subsystem instance has been installed.
 
         Returns True/False
         """
-        return os.path.exists(os.path.join(
-            paths.VAR_LIB_PKI_TOMCAT_DIR, self.subsystem.lower()))
+        try:
+            result = ipautil.run(
+                ['pki-server', 'subsystem-show', self.subsystem.lower()],
+                capture_output=True)
+            # parse the command output
+            return 'Enabled: True' in result.output
+        except ipautil.CalledProcessError:
+            return False
 
     def spawn_instance(self, cfg_file, nolog_list=()):
         """
@@ -229,6 +256,72 @@ class DogtagInstance(service.Service):
             logger.critical("failed to uninstall %s instance %s",
                             self.subsystem, e)
 
+    def __is_newer_tomcat_version(self, default=None):
+        try:
+            result = ipautil.run([paths.BIN_TOMCAT, "version"],
+                                 capture_output=True)
+            sn = re.search(
+                r'Server number:\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)',
+                result.output)
+            if sn is None:
+                logger.info("tomcat version cannot be parsed, "
+                            "default to pre-%s", default)
+                return False
+            v = tasks.parse_ipa_version(sn.group(1))
+            if v >= tasks.parse_ipa_version(default):
+                return True
+        except ipautil.CalledProcessError as e:
+            logger.info(
+                "failed to discover tomcat version, "
+                "default to pre-%s, error: %s",
+                default, str(e))
+        return False
+
+    def secure_ajp_connector(self):
+        """ Update AJP connector to use a password protection  """
+
+        server_xml = lxml.etree.parse(paths.PKI_TOMCAT_SERVER_XML)
+        doc = server_xml.getroot()
+
+        # no AJP connector means no need to update anything
+        connectors = doc.xpath('//Connector[@port="8009"]')
+        if len(connectors) == 0:
+            return
+
+        # AJP connector is set on port 8009. Use non-greedy search to find it
+        connector = connectors[0]
+
+        # Detect tomcat version and choose the right option name
+        # pre-9.0.31.0 uses 'requiredSecret'
+        # 9.0.31.0 or later uses 'secret'
+        secretattr = 'requiredSecret'
+        oldattr = 'requiredSecret'
+        if self.__is_newer_tomcat_version('9.0.31.0'):
+            secretattr = 'secret'
+
+        rewrite = True
+        if secretattr in connector.attrib:
+            # secret is already in place
+            # Perhaps, we need to synchronize it with Apache configuration
+            self.ajp_secret = connector.attrib[secretattr]
+            rewrite = False
+        else:
+            if oldattr in connector.attrib:
+                self.ajp_secret = connector.attrib[oldattr]
+                connector.attrib[secretattr] = self.ajp_secret
+                del connector.attrib[oldattr]
+            else:
+                # Generate password, don't use special chars to not break XML
+                self.ajp_secret = ipautil.ipa_generate_password(special=None)
+                connector.attrib[secretattr] = self.ajp_secret
+
+        if rewrite:
+            pent = pwd.getpwnam(constants.PKI_USER)
+            with open(paths.PKI_TOMCAT_SERVER_XML, "wb") as fd:
+                server_xml.write(fd, pretty_print=True, encoding="utf-8")
+                os.fchmod(fd.fileno(), 0o660)
+                os.fchown(fd.fileno(), pent.pw_uid, pent.pw_gid)
+
     def http_proxy(self):
         """ Update the http proxy file  """
         template_filename = (
@@ -237,12 +330,16 @@ class DogtagInstance(service.Service):
             DOGTAG_PORT=8009,
             CLONE='' if self.clone else '#',
             FQDN=self.fqdn,
+            DOGTAG_AJP_SECRET='',
         )
+        if self.ajp_secret:
+            sub_dict['DOGTAG_AJP_SECRET'] = "secret={}".format(self.ajp_secret)
         template = ipautil.template_file(template_filename, sub_dict)
         with open(paths.HTTPD_IPA_PKI_PROXY_CONF, "w") as fd:
             fd.write(template)
+            os.fchmod(fd.fileno(), 0o640)
 
-    def configure_certmonger_renewal(self):
+    def configure_certmonger_renewal_helpers(self):
         """
         Create a new CA type for certmonger that will retrieve updated
         certificates from the dogtag master server.
@@ -256,8 +353,12 @@ class DogtagInstance(service.Service):
         obj = bus.get_object('org.fedorahosted.certmonger',
                              '/org/fedorahosted/certmonger')
         iface = dbus.Interface(obj, 'org.fedorahosted.certmonger')
-        for suffix, args in [('', ''), ('-reuse', ' --reuse-existing')]:
-            name = 'dogtag-ipa-ca-renew-agent' + suffix
+        for suffix, args in [
+            ('', ''),
+            ('-reuse', ' --reuse-existing'),
+            ('-selfsigned', ' --force-self-signed'),
+        ]:
+            name = RENEWAL_CA_NAME + suffix
             path = iface.find_ca_by_nickname(name)
             if not path:
                 command = paths.DOGTAG_IPA_CA_RENEW_AGENT_SUBMIT + args
@@ -391,27 +492,31 @@ class DogtagInstance(service.Service):
 
         raise RuntimeError("%s configuration failed." % self.subsystem)
 
-    def __add_admin_to_group(self, group):
-        dn = DN(('cn', group), ('ou', 'groups'), ('o', 'ipaca'))
-        entry = api.Backend.ldap2.get_entry(dn)
-        members = entry.get('uniqueMember', [])
-        members.append(self.admin_dn)
-        mod = [(ldap.MOD_REPLACE, 'uniqueMember', members)]
+    def add_ipaca_aci(self):
+        """Add ACI to allow ipaca users to read their own group information
+
+        Dogtag users aren't allowed to enumerate their own groups. The
+        setup_admin() method needs the permission to wait, until all group
+        information has been replicated.
+        """
+        dn = self.ipaca_groups
+        mod = [(ldap.MOD_ADD, 'aci', [self.groups_aci])]
         try:
             api.Backend.ldap2.modify_s(dn, mod)
         except ldap.TYPE_OR_VALUE_EXISTS:
-            # already there
-            pass
+            logger.debug("%s already has ACI to read group information", dn)
+        else:
+            logger.debug("Added ACI to read groups to %s", dn)
 
     def setup_admin(self):
         self.admin_user = "admin-%s" % self.fqdn
         self.admin_password = ipautil.ipa_generate_password()
-        self.admin_dn = DN(('uid', self.admin_user),
-                           ('ou', 'people'), ('o', 'ipaca'))
-
+        self.admin_dn = DN(
+            ('uid', self.admin_user), self.ipaca_people
+        )
         # remove user if left-over exists
         try:
-            entry = api.Backend.ldap2.delete_entry(self.admin_dn)
+            api.Backend.ldap2.delete_entry(self.admin_dn)
         except errors.NotFound:
             pass
 
@@ -430,18 +535,57 @@ class DogtagInstance(service.Service):
         )
         api.Backend.ldap2.add_entry(entry)
 
+        wait_groups = []
         for group in self.admin_groups:
-            self.__add_admin_to_group(group)
+            group_dn = DN(('cn', group), self.ipaca_groups)
+            mod = [(ldap.MOD_ADD, 'uniqueMember', [self.admin_dn])]
+            try:
+                api.Backend.ldap2.modify_s(group_dn, mod)
+            except ldap.TYPE_OR_VALUE_EXISTS:
+                # already there
+                return None
+            else:
+                wait_groups.append(group_dn)
 
         # Now wait until the other server gets replicated this data
         ldap_uri = ipaldap.get_ldap_uri(self.master_host)
-        master_conn = ipaldap.LDAPClient(ldap_uri)
-        master_conn.gssapi_bind()
-        replication.wait_for_entry(master_conn, entry.dn)
-        del master_conn
+        master_conn = ipaldap.LDAPClient(ldap_uri, start_tls=True)
+        logger.debug(
+            "Waiting for %s to appear on %s", self.admin_dn, master_conn
+        )
+        deadline = time.time() + api.env.replication_wait_timeout
+        while time.time() < deadline:
+            time.sleep(1)
+            try:
+                master_conn.simple_bind(self.admin_dn, self.admin_password)
+            except errors.ACIError:
+                # user not replicated yet
+                pass
+            else:
+                logger.debug("Successfully logged in as %s", self.admin_dn)
+                break
+        else:
+            logger.error(
+                "Unable to log in as %s on %s", self.admin_dn, master_conn
+            )
+            raise errors.NotFound(
+                reason="{} did not replicate to {}".format(
+                    self.admin_dn, master_conn
+                )
+            )
+
+        # wait for group membership
+        for group_dn in wait_groups:
+            replication.wait_for_entry(
+                master_conn,
+                group_dn,
+                timeout=api.env.replication_wait_timeout,
+                attr='uniqueMember',
+                attrvalue=self.admin_dn
+            )
 
     def __remove_admin_from_group(self, group):
-        dn = DN(('cn', group), ('ou', 'groups'), ('o', 'ipaca'))
+        dn = DN(('cn', group), self.ipaca_groups)
         mod = [(ldap.MOD_DELETE, 'uniqueMember', self.admin_dn)]
         try:
             api.Backend.ldap2.modify_s(dn, mod)
@@ -473,3 +617,48 @@ class DogtagInstance(service.Service):
             raise RuntimeError(
                 "Dogtag must be stopped when creating backup of %s" % path)
         shutil.copy(path, path + '.ipabkp')
+
+    def reindex_task(self, force=False):
+        """Reindex ipaca entries
+
+        pkispawn sometimes does not run its indextasks. This leads to slow
+        unindexed filters on attributes such as description, which is used
+        to log in with a certificate. Explicitly reindex attribute that
+        should have been reindexed by CA's indextasks.ldif.
+
+        See https://pagure.io/dogtagpki/issue/3083
+        """
+        state_name = 'reindex_task'
+        if not force and sysupgrade.get_upgrade_state('dogtag', state_name):
+            return
+
+        cn = "indextask_ipaca_{}".format(int(time.time()))
+        dn = DN(
+            ('cn', cn), ('cn', 'index'), ('cn', 'tasks'), ('cn', 'config')
+        )
+        entry = api.Backend.ldap2.make_entry(
+            dn,
+            objectClass=['top', 'extensibleObject'],
+            cn=[cn],
+            nsInstance=['ipaca'],  # Dogtag PKI database
+            nsIndexAttribute=[
+                # from pki/base/ca/shared/conf/indextasks.ldif
+                'archivedBy', 'certstatus', 'clientId', 'dataType',
+                'dateOfCreate', 'description', 'duration', 'extension',
+                'issuedby', 'issuername', 'metaInfo', 'notafter',
+                'notbefore', 'ownername', 'publicKeyData', 'requestid',
+                'requestowner', 'requestsourceid', 'requeststate',
+                'requesttype', 'revInfo', 'revokedOn', 'revokedby',
+                'serialno', 'status', 'subjectname',
+            ],
+            ttl=[10],
+        )
+        logger.debug('Creating ipaca reindex task %s', dn)
+        api.Backend.ldap2.add_entry(entry)
+        logger.debug('Waiting for task...')
+        exitcode = replication.wait_for_task(api.Backend.ldap2, dn)
+        logger.debug(
+            'Task %s has finished with exit code %i',
+            dn, exitcode
+        )
+        sysupgrade.set_upgrade_state('dogtag', state_name, True)

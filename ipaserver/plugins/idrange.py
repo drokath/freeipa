@@ -17,13 +17,16 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from __future__ import absolute_import
+
 import six
 
 from ipalib.plugable import Registry
 from .baseldap import (LDAPObject, LDAPCreate, LDAPDelete,
                                      LDAPRetrieve, LDAPSearch, LDAPUpdate)
-from ipalib import api, Int, Str, StrEnum, _, ngettext
+from ipalib import api, Int, Str, StrEnum, _, ngettext, messages
 from ipalib import errors
+from ipaplatform import services
 from ipapython.dn import DN
 
 if six.PY3:
@@ -239,18 +242,19 @@ class idrange(LDAPObject):
             cli_name='dom_name',
             flags=('no_search', 'virtual_attribute', 'no_update'),
             label=_('Name of the trusted domain'),
-        ),
+            ),
         StrEnum('iparangetype?',
-            label=_('Range type'),
-            cli_name='type',
-            doc=(_('ID range type, one of {vals}'
-                 .format(vals=', '.join(range_types.keys())))),
-            values=tuple(range_types.keys()),
-            flags=['no_update'],
-        )
+                label=_('Range type'),
+                cli_name='type',
+                doc=(_('ID range type, one of {vals}'
+                     .format(vals=', '.join(sorted(range_types))))),
+                values=sorted(range_types),
+                flags=['no_update'],
+                )
     )
 
-    def handle_iparangetype(self, entry_attrs, options, keep_objectclass=False):
+    def handle_iparangetype(self, entry_attrs, options,
+                            keep_objectclass=False):
         if not any((options.get('pkey_only', False),
                     options.get('raw', False))):
             range_type = entry_attrs['iparangetype'][0]
@@ -423,10 +427,10 @@ class idrange_add(LDAPCreate):
             if sid is not None:
                 entry_attrs['ipanttrusteddomainsid'] = sid
             else:
-                raise errors.ValidationError(name='ID Range setup',
-                    error=_('SID for the specified trusted domain name could '
-                            'not be found. Please specify the SID directly '
-                            'using dom-sid option.'))
+                raise errors.ValidationError(
+                    name='ID Range setup',
+                    error=_('Specified trusted domain name could not be '
+                            'found.'))
 
         # ipaNTTrustedDomainSID attribute set, this is AD Trusted domain range
         if is_set('ipanttrusteddomainsid'):
@@ -767,4 +771,10 @@ class idrange_mod(LDAPUpdate):
         assert isinstance(dn, DN)
         self.obj.handle_ipabaserid(entry_attrs, options)
         self.obj.handle_iparangetype(entry_attrs, options)
+        self.add_message(
+            messages.ServiceRestartRequired(
+                service=services.knownservices['sssd'].systemd_name,
+                server=keys[0]
+            )
+        )
         return dn

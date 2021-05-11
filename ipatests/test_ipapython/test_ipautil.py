@@ -21,12 +21,17 @@
 """
 Test the `ipapython/ipautil.py` module.
 """
+from __future__ import absolute_import
 
+import os
+import pwd
 import nose
 import pytest
 import six
 import tempfile
 
+from ipaplatform.paths import paths
+from ipalib.constants import IPAAPI_USER
 from ipapython import ipautil
 
 pytestmark = pytest.mark.tier0
@@ -415,7 +420,7 @@ class TestTimeParser(object):
 
 
 def test_run():
-    result = ipautil.run(['echo', 'foo\x02bar'],
+    result = ipautil.run([paths.ECHO, 'foo\x02bar'],
                          capture_output=True,
                          capture_error=True)
     assert result.returncode == 0
@@ -426,7 +431,7 @@ def test_run():
 
 
 def test_run_no_capture_output():
-    result = ipautil.run(['echo', 'foo\x02bar'])
+    result = ipautil.run([paths.ECHO, 'foo\x02bar'])
     assert result.returncode == 0
     assert result.output is None
     assert result.raw_output == b'foo\x02bar\n'
@@ -435,13 +440,13 @@ def test_run_no_capture_output():
 
 
 def test_run_bytes():
-    result = ipautil.run(['echo', b'\x01\x02'], capture_output=True)
+    result = ipautil.run([paths.ECHO, b'\x01\x02'], capture_output=True)
     assert result.returncode == 0
     assert result.raw_output == b'\x01\x02\n'
 
 
 def test_run_decode():
-    result = ipautil.run(['echo', u'á'.encode('utf-8')],
+    result = ipautil.run([paths.ECHO, u'á'.encode('utf-8')],
                          encoding='utf-8', capture_output=True)
     assert result.returncode == 0
     if six.PY3:
@@ -453,11 +458,11 @@ def test_run_decode():
 def test_run_decode_bad():
     if six.PY3:
         with pytest.raises(UnicodeDecodeError):
-            ipautil.run(['echo', b'\xa0\xa1'],
+            ipautil.run([paths.ECHO, b'\xa0\xa1'],
                         capture_output=True,
                         encoding='utf-8')
     else:
-        result = ipautil.run(['echo', '\xa0\xa1'],
+        result = ipautil.run([paths.ECHO, '\xa0\xa1'],
                              capture_output=True,
                              encoding='utf-8')
         assert result.returncode == 0
@@ -465,7 +470,7 @@ def test_run_decode_bad():
 
 
 def test_backcompat():
-    result = out, err, rc = ipautil.run(['echo', 'foo\x02bar'],
+    result = out, err, rc = ipautil.run([paths.ECHO, 'foo\x02bar'],
                                         capture_output=True,
                                         capture_error=True)
     assert rc is result.returncode
@@ -477,3 +482,23 @@ def test_flush_sync():
     with tempfile.NamedTemporaryFile('wb+') as f:
         f.write(b'data')
         ipautil.flush_sync(f)
+
+
+@pytest.mark.skipif(os.geteuid() != 0,
+                    reason="Must have root privileges to run this test")
+def test_run_runas():
+    """
+    Test run method with the runas parameter.
+    The test executes 'id' to make sure that the process is
+    executed with the user identity specified in runas parameter.
+    The test is using 'ipaapi' user as it is configured when
+    ipa-server-common package is installed.
+    """
+    user = pwd.getpwnam(IPAAPI_USER)
+    res = ipautil.run(['/usr/bin/id', '-u'], runas=IPAAPI_USER)
+    assert res.returncode == 0
+    assert res.raw_output == b'%d\n' % user.pw_uid
+
+    res = ipautil.run(['/usr/bin/id', '-g'], runas=IPAAPI_USER)
+    assert res.returncode == 0
+    assert res.raw_output == b'%d\n' % user.pw_gid

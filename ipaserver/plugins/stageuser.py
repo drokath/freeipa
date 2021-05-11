@@ -17,6 +17,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from __future__ import absolute_import
+
 import logging
 import posixpath
 from copy import deepcopy
@@ -447,7 +449,8 @@ class stageuser_find(baseuser_find):
         self.pre_common_callback(ldap, filter, attrs_list, base_dn, scope,
                                  *keys, **options)
 
-        container_filter = "(objectclass=posixaccount)"
+        container_filter = ldap.make_filter_from_attr(
+            'objectclass', 'posixaccount')
         # provisioning system can create non posixaccount stage user
         # but then they have to create inetOrgPerson stage user
         stagefilter = filter.replace(container_filter,

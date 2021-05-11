@@ -6,9 +6,10 @@ import re
 
 import pytest
 
+
 from ipatests.test_integration.base import IntegrationTest
-from ipatests.pytest_plugins.integration import tasks
-from ipatests.pytest_plugins.integration.env_config import get_global_config
+from ipatests.pytest_ipa.integration import tasks
+from ipatests.pytest_ipa.integration.env_config import get_global_config
 from ipalib.constants import DOMAIN_SUFFIX_NAME
 from ipatests.util import assert_deepequal
 
@@ -25,26 +26,7 @@ def find_segment(master, replica):
     for segment in allsegments:
         if master.hostname in segment and replica.hostname in segment:
             return '-to-'.join(segment)
-
-
-def remove_segment(master, host1, host2):
-    """
-    This removes a segment between host1 and host2 on master. The function is
-    needed because test_add_remove_segment expects only one segment, but due to
-    track tickete N 6250, the test_topology_updated_on_replica_install_remove
-    leaves 2 topology segments
-    """
-    def wrapper(func):
-        def wrapped(*args, **kwargs):
-            try:
-                func(*args, **kwargs)
-            finally:
-                segment = find_segment(host1, host2)
-                master.run_command(['ipa', 'topologysegment-del',
-                                    DOMAIN_SUFFIX_NAME, segment],
-                                   raiseonerr=False)
-        return wrapped
-    return wrapper
+    return None
 
 
 @pytest.mark.skipif(config.domain_level == 0, reason=reasoning)
@@ -84,10 +66,7 @@ class TestTopologyOptions(IntegrationTest):
                               )
         return result
 
-    @pytest.mark.xfail(reason="Trac 6250", strict=True)
-    @remove_segment(config.domains[0].master,
-                    config.domains[0].master,
-                    config.domains[0].replicas[1])
+
     def test_topology_updated_on_replica_install_remove(self):
         """
         Install and remove a replica and make sure topology information is
@@ -120,8 +99,11 @@ class TestTopologyOptions(IntegrationTest):
         assert_deepequal(result3.stdout_text,  result4.stdout_text)
         # Now let's check that uninstalling the replica will update the topology
         # info on the rest of replicas.
-        tasks.uninstall_master(self.replicas[1])
+        # first step of uninstallation is removal of the replica on other
+        # master, then it can be uninstalled. Doing it the other way is also
+        # possible, but not reliable - some data might not be replicated.
         tasks.clean_replication_agreement(self.master, self.replicas[1])
+        tasks.uninstall_master(self.replicas[1])
         result5 = self.master.run_command(['ipa', 'topologysegment-find',
                                            DOMAIN_SUFFIX_NAME])
         num_entries = self.noentries_re.search(result5.stdout_text).group(1)
@@ -158,8 +140,8 @@ class TestTopologyOptions(IntegrationTest):
         assert returncode == 0, error
         # Wait till replication ends and make sure replica1 does not have
         # segment that was deleted on master
-        replica1_ldap = self.replicas[0].ldap_connect()
-        tasks.wait_for_replication(replica1_ldap)
+        master_ldap = self.master.ldap_connect()
+        tasks.wait_for_replication(master_ldap)
         result3 = self.replicas[0].run_command(['ipa', 'topologysegment-find',
                                                DOMAIN_SUFFIX_NAME]).stdout_text
         assert(deleteme not in result3), "%s: segment still exists" % deleteme
@@ -168,8 +150,7 @@ class TestTopologyOptions(IntegrationTest):
         self.master.run_command(['ipa', 'user-add', 'someuser',
                                  '--first', 'test',
                                  '--last', 'user'])
-        dest_ldap = self.replicas[1].ldap_connect()
-        tasks.wait_for_replication(dest_ldap)
+        tasks.wait_for_replication(master_ldap)
         result4 = self.replicas[1].run_command(['ipa', 'user-find'])
         assert('someuser' in result4.stdout_text), 'User not found: someuser'
         # We end up having a line topology: master <-> replica1 <-> replica2
@@ -260,6 +241,10 @@ class TestCASpecificRUVs(IntegrationTest):
             "Did not find proper number of replica hostname (%s) occurrencies"
             " in the command output: %s" % (replica.hostname, res1))
         tasks.uninstall_master(replica)
+        # ipa-replica-manage del launches a clean-ruv task which is
+        # ASYNCHRONOUS
+        # wait for the task to finish before checking list-ruv
+        tasks.wait_for_cleanallruv_tasks(self.master.ldap_connect())
         res2 = master.run_command(['ipa-replica-manage', 'list-ruv', '-p',
                                   master.config.dirman_password]).stdout_text
         assert(replica.hostname not in res2), (

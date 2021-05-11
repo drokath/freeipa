@@ -22,7 +22,7 @@
 # This is used so we can add tracking to the Apache and 389-ds
 # server certificates created during the IPA server installation.
 
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 
 import logging
 import os
@@ -179,6 +179,9 @@ def _get_requests(criteria=dict()):
         for criterion in criteria:
             if criterion == 'ca-name':
                 ca_path = request.obj_if.get_ca()
+                if ca_path is None:
+                    raise RuntimeError("certmonger CA '%s' is not defined" %
+                                       criteria.get('ca-name'))
                 ca = _cm_dbus_object(cm.bus, cm, ca_path, DBUS_CM_CA_IF,
                                      DBUS_CM_IF)
                 value = ca.obj_if.get_nickname()
@@ -305,20 +308,56 @@ def add_subject(request_id, subject):
 def request_and_wait_for_cert(
         certpath, subject, principal, nickname=None, passwd_fname=None,
         dns=None, ca='IPA', profile=None,
-        pre_command=None, post_command=None, storage='NSSDB', perms=None):
-    """
-    Execute certmonger to request a server certificate.
+        pre_command=None, post_command=None, storage='NSSDB', perms=None,
+        resubmit_timeout=0):
+    """Request certificate, wait and possibly resubmit failing requests
 
-    The method also waits for the certificate to be available.
+    Submit a cert request to certmonger and wait until the request has
+    finished.
+
+    With timeout, a failed request is resubmitted. During parallel replica
+    installation, a request sometimes fails with CA_REJECTED or
+    CA_UNREACHABLE. The error occurs when the master is either busy or some
+    information haven't been replicated yet. Even a stuck request can be
+    recovered, e.g. when permission and group information have been
+    replicated.
     """
-    reqId = request_cert(certpath, subject, principal, nickname,
-                         passwd_fname, dns, ca, profile,
-                         pre_command, post_command, storage, perms)
-    state = wait_for_request(reqId, api.env.startup_timeout)
-    ca_error = get_request_value(reqId, 'ca-error')
-    if state != 'MONITORING' or ca_error:
-        raise RuntimeError("Certificate issuance failed ({})".format(state))
-    return reqId
+    req_id = request_cert(
+        certpath, subject, principal, nickname, passwd_fname, dns, ca,
+        profile, pre_command, post_command, storage, perms
+    )
+
+    deadline = time.time() + resubmit_timeout
+    while True:  # until success, timeout, or error
+        state = wait_for_request(req_id, api.env.replication_wait_timeout)
+        ca_error = get_request_value(req_id, 'ca-error')
+        if state == 'MONITORING' and ca_error is None:
+            # we got a winner, exiting
+            logger.debug("Cert request %s was successful", req_id)
+            return req_id
+
+        logger.debug(
+            "Cert request %s failed: %s (%s)", req_id, state, ca_error
+        )
+        if state not in {'CA_REJECTED', 'CA_UNREACHABLE'}:
+            # probably unrecoverable error
+            logger.debug("Giving up on cert request %s", req_id)
+            break
+        if not resubmit_timeout:
+            # no resubmit
+            break
+        if time.time() > deadline:
+            logger.debug("Request %s reached resubmit dead line", req_id)
+            break
+        else:
+            # sleep and resubmit
+            logger.debug("Sleep and resubmit cert request %s", req_id)
+            time.sleep(10)
+            resubmit_request(req_id)
+
+    raise RuntimeError(
+        "Certificate issuance failed ({}: {})".format(state, ca_error)
+    )
 
 
 def request_cert(

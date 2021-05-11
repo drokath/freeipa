@@ -34,6 +34,12 @@ objectClass: top
 objectClass: nsContainer
 cn: hostgroups
 
+dn: cn=ipservices,cn=accounts,$SUFFIX
+changetype: add
+objectClass: top
+objectClass: nsContainer
+cn: ipservices
+
 dn: cn=alt,$SUFFIX
 changetype: add
 objectClass: nsContainer
@@ -226,6 +232,7 @@ objectClass: ipaobject
 objectClass: ipasshuser
 uid: admin
 krbPrincipalName: admin@$REALM
+krbPrincipalName: root@$REALM
 cn: Administrator
 sn: Administrator
 uidNumber: $IDSTART
@@ -340,6 +347,14 @@ cn: sudo-i
 description: sudo-i
 ipauniqueid:autogenerate
 
+dn: cn=systemd-user,cn=hbacservices,cn=hbac,$SUFFIX
+changetype: add
+objectclass: ipahbacservice
+objectclass: ipaobject
+cn: systemd-user
+description: pam_systemd and systemd user@.service
+ipauniqueid:autogenerate
+
 dn: cn=gdm,cn=hbacservices,cn=hbac,$SUFFIX
 changetype: add
 objectclass: ipahbacservice
@@ -411,7 +426,7 @@ ipaDefaultEmailDomain: $DOMAIN
 ipaMigrationEnabled: FALSE
 ipaConfigString: AllowNThash
 ipaConfigString: KDC:Disable Last Success
-ipaSELinuxUserMapOrder: guest_u:s0$$xguest_u:s0$$user_u:s0$$staff_u:s0-s0:c0.c1023$$unconfined_u:s0-s0:c0.c1023
+ipaSELinuxUserMapOrder: guest_u:s0$$xguest_u:s0$$user_u:s0$$staff_u:s0-s0:c0.c1023$$sysadm_u:s0-s0:c0.c1023$$unconfined_u:s0-s0:c0.c1023
 ipaSELinuxUserMapDefault: unconfined_u:s0-s0:c0.c1023
 
 dn: cn=cosTemplates,cn=accounts,$SUFFIX

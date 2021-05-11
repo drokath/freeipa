@@ -1536,8 +1536,6 @@ exp.boolean_state_evaluator = IPA.boolean_state_evaluator = function(spec) {
 
     that.param = spec.param || that.field_name;
 
-    that.adapter = builder.build('adapter', spec.adapter || 'adapter', { context: that });
-
     /**
      * State to set when value is `true`
      * @property {string}
@@ -1643,8 +1641,6 @@ exp.acl_state_evaluator = IPA.acl_state_evaluator = function(spec) {
 
     that.param = spec.param || 'attributelevelrights';
 
-    that.adapter = builder.build('adapter', spec.adapter || 'adapter', { context: that });
-
     /**
      * @inheritDoc
      */
@@ -1687,7 +1683,6 @@ exp.value_state_evaluator = IPA.value_state_evaluator = function(spec) {
 
     spec.name = spec.name || 'value_state_evaluator';
     spec.event = spec.event || 'post_load';
-    spec.adapter = spec.adapter || {};
 
     var that = IPA.state_evaluator(spec);
 
@@ -1711,9 +1706,6 @@ exp.value_state_evaluator = IPA.value_state_evaluator = function(spec) {
      * @property {string}
      */
     that.representation = spec.representation;
-
-    that.adapter = builder.build('adapter',
-                    spec.adapter, { context: that });
 
     that.param = spec.param;
 
@@ -1798,7 +1790,6 @@ exp.has_keytab_evaluator = IPA.has_keytab_evaluator = function(spec) {
     spec.value = spec.value || [true];
     spec.representation = spec.representation || 'has_keytab';
     spec.param = spec.param || 'has_keytab';
-    spec.adapter = spec.adapter || { $type: 'adapter' };
 
     var that = IPA.value_state_evaluator(spec);
 
@@ -1823,7 +1814,6 @@ exp.object_class_evaluator = IPA.object_class_evaluator = function(spec) {
 
     var that = IPA.state_evaluator(spec);
 
-
     /**
      * @inheritDoc
      */
@@ -1832,7 +1822,7 @@ exp.object_class_evaluator = IPA.object_class_evaluator = function(spec) {
         var old_state, classes, i;
 
         old_state = that.state;
-        classes = data.result.result.objectclass;
+        classes = that.adapter.load(data, 'objectclass');
 
         that.state = [];
 

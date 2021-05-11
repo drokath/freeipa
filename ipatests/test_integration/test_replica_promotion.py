@@ -2,17 +2,31 @@
 # Copyright (C) 2016  FreeIPA Contributors see COPYING for license
 #
 
+from __future__ import absolute_import
+
 import time
+import re
 from tempfile import NamedTemporaryFile
 import textwrap
 import pytest
 from ipatests.test_integration.base import IntegrationTest
-from ipatests.pytest_plugins.integration import tasks
-from ipatests.pytest_plugins.integration.tasks import (
+from ipatests.pytest_ipa.integration import tasks
+from ipatests.pytest_ipa.integration.tasks import (
     assert_error, replicas_cleanup)
-from ipalib.constants import DOMAIN_LEVEL_0
-from ipalib.constants import DOMAIN_LEVEL_1
-from ipalib.constants import DOMAIN_SUFFIX_NAME
+from ipatests.pytest_ipa.integration.env_config import get_global_config
+from ipalib.constants import (
+    DOMAIN_LEVEL_0, DOMAIN_LEVEL_1, DOMAIN_SUFFIX_NAME, IPA_CA_NICKNAME,
+    CA_SUFFIX_NAME)
+from ipaplatform.paths import paths
+from ipatests.test_integration.test_backup_and_restore import backup
+from ipatests.test_integration.test_dns_locations import (
+    resolve_records_from_server, IPA_DEFAULT_MASTER_SRV_REC
+)
+from ipapython.dnsutil import DNSName
+from ipalib.constants import IPA_CA_RECORD
+
+
+config = get_global_config()
 
 
 class ReplicaPromotionBase(IntegrationTest):
@@ -184,6 +198,26 @@ class TestReplicaPromotionLevel1(ReplicaPromotionBase):
                              "is supported only in 0-level IPA domain", 1)
 
     @replicas_cleanup
+    def test_one_step_install_pwd_and_admin_pwd(self):
+        """--password and --admin-password options are mutually exclusive
+
+        Test for ticket 6353
+        """
+        expected_err = "--password and --admin-password options are " \
+                       "mutually exclusive"
+        result = self.replicas[0].run_command([
+            'ipa-replica-install', '-w',
+            self.master.config.admin_password,
+            '-p', 'OTPpwd',
+            '-n', self.master.domain.name,
+            '-r', self.master.domain.realm,
+            '--server', self.master.hostname,
+            '-U'],
+            raiseonerr=False)
+        assert result.returncode == 1
+        assert expected_err in result.stderr_text
+
+    @replicas_cleanup
     def test_one_command_installation(self):
         """
         TestCase:
@@ -196,6 +230,9 @@ class TestReplicaPromotionLevel1(ReplicaPromotionBase):
                                      '-r', self.master.domain.realm,
                                      '--server', self.master.hostname,
                                      '-U'])
+        # Ensure that pkinit is properly configured, test for 7566
+        result = self.replicas[0].run_command(['ipa-pkinit-manage', 'status'])
+        assert "PKINIT is enabled" in result.stdout_text
 
 
 @pytest.mark.xfail(reason="Ticket N 6274")
@@ -403,6 +440,9 @@ class TestWrongClientDomain(IntegrationTest):
         tasks.install_master(cls.master, domain_level=cls.domain_level)
 
     def teardown_method(self, method):
+        if len(config.domains) == 0:
+            # No YAML config was set
+            return
         self.replicas[0].run_command(['ipa-client-install',
                                      '--uninstall', '-U'],
                                     raiseonerr=False)
@@ -454,6 +494,13 @@ class TestRenewalMaster(IntegrationTest):
     def uninstall(cls, mh):
         super(TestRenewalMaster, cls).uninstall(mh)
 
+    def assertCARenewalMaster(self, host, expected):
+        """ Ensure there is only one CA renewal master set """
+        result = host.run_command(["ipa", "config-show"]).stdout_text
+        matches = list(re.finditer('IPA CA renewal master: (.*)', result))
+        assert len(matches), 1
+        assert matches[0].group(1) == expected
+
     def test_replica_not_marked_as_renewal_master(self):
         """
         https://fedorahosted.org/freeipa/ticket/5902
@@ -476,10 +523,45 @@ class TestRenewalMaster(IntegrationTest):
         assert("IPA CA renewal master: %s" % replica.hostname in result), (
             "Replica hostname not found among CA renewal masters"
         )
+        # additional check e.g. to see if there is only one renewal master
+        self.assertCARenewalMaster(replica, replica.hostname)
+
+    def test_renewal_master_with_csreplica_manage(self):
+
+        master = self.master
+        replica = self.replicas[0]
+
+        self.assertCARenewalMaster(master, replica.hostname)
+        self.assertCARenewalMaster(replica, replica.hostname)
+
+        master.run_command(['ipa-csreplica-manage', 'set-renewal-master',
+                            '-p', master.config.dirman_password])
+        result = master.run_command(["ipa", "config-show"]).stdout_text
+
+        assert("IPA CA renewal master: %s" % master.hostname in result), (
+            "Master hostname not found among CA renewal masters"
+        )
+
+        # lets give replication some time
+        time.sleep(60)
+
+        self.assertCARenewalMaster(master, master.hostname)
+        self.assertCARenewalMaster(replica, master.hostname)
+
+        replica.run_command(['ipa-csreplica-manage', 'set-renewal-master',
+                             '-p', replica.config.dirman_password])
+        result = replica.run_command(["ipa", "config-show"]).stdout_text
+
+        assert("IPA CA renewal master: %s" % replica.hostname in result), (
+            "Replica hostname not found among CA renewal masters"
+        )
+
+        self.assertCARenewalMaster(master, replica.hostname)
+        self.assertCARenewalMaster(replica, replica.hostname)
 
     def test_automatic_renewal_master_transfer_ondelete(self):
-        # Test that after master uninstallation, replica overtakes the cert
-        # renewal master role
+        # Test that after replica uninstallation, master overtakes the cert
+        # renewal master role from replica (which was previously set there)
         tasks.uninstall_master(self.replicas[0])
         result = self.master.run_command(['ipa', 'config-show']).stdout_text
         assert("IPA CA renewal master: %s" % self.master.hostname in result), (
@@ -527,3 +609,432 @@ class TestReplicaInstallWithExistingEntry(IntegrationTest):
         master.run_command(arg)
 
         tasks.install_replica(master, replica)
+
+
+class TestSubCAkeyReplication(IntegrationTest):
+    """
+    Test if subca key replication is not failing.
+    """
+    topology = 'line'
+    num_replicas = 1
+
+    SUBCA = 'test_subca'
+    SUBCA_CN = 'cn=' + SUBCA
+
+    PKI_DEBUG_PATH = '/var/log/pki/pki-tomcat/ca/debug'
+
+    ERR_MESS = 'Caught exception during cert/key import'
+
+    def test_sub_ca_key_replication(self):
+        master = self.master
+        replica = self.replicas[0]
+
+        result = master.run_command(['ipa', 'ca-add', self.SUBCA, '--subject',
+                                     self.SUBCA_CN])
+
+        uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        auth_id_re = re.compile('Authority ID: ({})'.format(uuid),
+                                re.IGNORECASE)
+        auth_id = "".join(re.findall(auth_id_re, result.stdout_text))
+
+        cert_nick = '{} {}'.format(IPA_CA_NICKNAME, auth_id)
+
+        # give replication some time
+        time.sleep(30)
+
+        replica.run_command(['ipa-certupdate'])
+        replica.run_command(['ipa', 'ca-show', self.SUBCA])
+
+        tasks.run_certutil(replica, ['-L', '-n', cert_nick],
+                           paths.PKI_TOMCAT_ALIAS_DIR)
+
+        pki_debug_log = replica.get_file_contents(self.PKI_DEBUG_PATH,
+                                                  encoding='utf-8')
+        # check for cert/key import error message
+        assert self.ERR_MESS not in pki_debug_log
+
+    def test_sign_with_subca_on_replica(self):
+        master = self.master
+        replica = self.replicas[0]
+
+        TEST_KEY_FILE = '/etc/pki/tls/private/test_subca.key'
+        TEST_CRT_FILE = '/etc/pki/tls/private/test_subca.crt'
+
+        caacl_cmd = ['ipa', 'caacl-add-ca', 'hosts_services_caIPAserviceCert',
+                     '--cas', self.SUBCA]
+        master.run_command(caacl_cmd)
+
+        request_cmd = [paths.IPA_GETCERT, 'request', '-w', '-k',
+                       TEST_KEY_FILE, '-f', TEST_CRT_FILE, '-X', self.SUBCA]
+        replica.run_command(request_cmd)
+
+        status_cmd = [paths.IPA_GETCERT, 'status', '-v', '-f', TEST_CRT_FILE]
+        status = replica.run_command(status_cmd)
+        assert 'State MONITORING, stuck: no' in status.stdout_text
+
+        ssl_cmd = ['openssl', 'x509', '-text', '-in', TEST_CRT_FILE,
+                   '-nameopt', 'space_eq']
+        ssl = replica.run_command(ssl_cmd)
+        assert 'Issuer: CN = {}'.format(self.SUBCA) in ssl.stdout_text
+
+
+class TestReplicaInstallCustodia(IntegrationTest):
+    """
+    Pagure Reference: https://pagure.io/freeipa/issue/7518
+    """
+
+    topology = 'line'
+    num_replicas = 2
+    domain_level = DOMAIN_LEVEL_1
+
+    @classmethod
+    def install(cls, mh):
+        tasks.install_master(cls.master, domain_level=cls.domain_level)
+
+    def test_replica_install_for_custodia(self):
+        master = self.master
+        replica1 = self.replicas[0]
+        replica2 = self.replicas[1]
+
+        # Install Replica1 without CA and stop ipa-custodia
+        tasks.install_replica(master, replica1, setup_ca=False)
+        replica1.run_command(['ipactl', 'status'])
+        replica1.run_command(['systemctl', 'stop', 'ipa-custodia'])
+        replica1.run_command(['ipactl', 'status'])
+
+        # Install Replica2 with CA with source as Replica1.
+        tasks.install_replica(replica1, replica2, setup_ca=True)
+        result = replica2.run_command(['ipactl', 'status'])
+        assert 'ipa-custodia Service: RUNNING' in result.stdout_text
+
+
+def update_etc_hosts(host, ip, old_hostname, new_hostname):
+    '''Adds or update /etc/hosts
+
+    If /etc/hosts contains an entry for old_hostname, replace it with
+    new_hostname.
+    If /etc/hosts did not contain the entry, create one for new_hostname with
+    the provided ip.
+    The function makes a backup in /etc/hosts.sav
+
+    :param host the machine on which /etc/hosts needs to be update_dns_records
+    :param ip the ip address for the new record
+    :param old_hostname the hostname to replace
+    :param new_hostname the new hostname to put in /etc/hosts
+    '''
+    # Make a backup
+    host.run_command(['/usr/bin/cp',
+                      paths.HOSTS,
+                      '%s.sav' % paths.HOSTS])
+    contents = host.get_file_contents(paths.HOSTS, encoding='utf-8')
+    # If /etc/hosts already contains old_hostname, simply replace
+    pattern = r'^(.*\s){}(\s)'.format(old_hostname)
+    new_contents, mods = re.subn(pattern, r'\1{}\2'.format(new_hostname),
+                                 contents, flags=re.MULTILINE)
+    # If it didn't contain any entry for old_hostname, just add new_hostname
+    if mods == 0:
+        short = new_hostname.split(".", 1)[0]
+        new_contents = new_contents + "\n{}\t{} {}\n".format(ip,
+                                                             new_hostname,
+                                                             short)
+    host.put_file_contents(paths.HOSTS, new_contents)
+
+
+def restore_etc_hosts(host):
+    '''Restores /etc/hosts.sav into /etc/hosts
+    '''
+    host.run_command(['/usr/bin/mv',
+                      '%s.sav' % paths.HOSTS,
+                      paths.HOSTS],
+                     raiseonerr=False)
+
+
+class TestReplicaInForwardZone(IntegrationTest):
+    """
+    Pagure Reference: https://pagure.io/freeipa/issue/7369
+
+    Scenario: install a replica whose name is in a forwarded zone
+    """
+
+    forwardzone = 'forward.test'
+    num_replicas = 1
+
+    @classmethod
+    def install(cls, mh):
+        tasks.install_master(cls.master, setup_dns=True)
+
+    def test_replica_install_in_forward_zone(self):
+        master = self.master
+        replica = self.replicas[0]
+
+        # Create a forward zone on the master
+        master.run_command(['ipa', 'dnsforwardzone-add', self.forwardzone,
+                            '--skip-overlap-check',
+                            '--forwarder', master.config.dns_forwarder])
+
+        # Configure the client with a name in the forwardzone
+        r_shortname = replica.hostname.split(".", 1)[0]
+        r_new_hostname = '{}.{}'.format(r_shortname,
+                                        self.forwardzone)
+
+        # Update /etc/hosts on the master with an entry for the replica
+        # otherwise replica conncheck would fail
+        update_etc_hosts(master, replica.ip, replica.hostname,
+                         r_new_hostname)
+        # Remove the replica previous hostname from /etc/hosts
+        # and add the replica new hostname
+        # otherwise replica install will complain because
+        # hostname does not match
+        update_etc_hosts(replica, replica.ip, replica.hostname,
+                         r_new_hostname)
+
+        try:
+            # install client with a hostname in the forward zone
+            tasks.install_client(self.master, replica,
+                                 extra_args=['--hostname', r_new_hostname])
+
+            replica.run_command(['ipa-replica-install',
+                                 '--principal', replica.config.admin_name,
+                                 '--admin-password',
+                                 replica.config.admin_password,
+                                 '--setup-dns',
+                                 '--forwarder', master.config.dns_forwarder,
+                                 '-U'])
+        finally:
+            # Restore /etc/hosts on master and replica
+            restore_etc_hosts(master)
+            restore_etc_hosts(replica)
+
+
+class TestHiddenReplicaPromotion(IntegrationTest):
+    """Test hidden replica features
+    """
+    topology = None
+    num_replicas = 2
+
+    @classmethod
+    def install(cls, mh):
+        # master with DNSSEC master
+        tasks.install_master(cls.master, setup_dns=True, setup_kra=True)
+        cls.master.run_command([
+            "ipa-dns-install",
+            "--dnssec-master",
+            "--forwarder", cls.master.config.dns_forwarder,
+            "-U",
+        ])
+        # hidden replica with CA and DNS
+        tasks.install_replica(
+            cls.master, cls.replicas[0],
+            setup_dns=True, setup_kra=False,
+            extra_args=('--hidden-replica',)
+        )
+        # manually install KRA to verify that hidden state is synced
+        tasks.install_kra(cls.replicas[0])
+
+    def _check_dnsrecords(self, hosts_expected, hosts_unexpected=()):
+        domain = DNSName(self.master.domain.name).make_absolute()
+        rset = [
+            (rname, 'SRV')
+            for rname, _port in IPA_DEFAULT_MASTER_SRV_REC
+        ]
+        rset.append((DNSName(IPA_CA_RECORD), 'A'))
+
+        for rname, rtype in rset:
+            name_abs = rname.derelativize(domain)
+            query = resolve_records_from_server(
+                name_abs, rtype, self.master.ip
+            )
+            if rtype == 'SRV':
+                records = [q.target.to_text() for q in query]
+            else:
+                records = [q.address for q in query]
+            for host in hosts_expected:
+                value = host.hostname + "." if rtype == 'SRV' else host.ip
+                assert value in records
+            for host in hosts_unexpected:
+                value = host.hostname + "." if rtype == 'SRV' else host.ip
+                assert value not in records
+
+    def _check_server_role(self, host, status, kra=True, dns=True):
+        roles = [u'IPA master', u'CA server']
+        if kra:
+            roles.append(u'KRA server')
+        if dns:
+            roles.append(u'DNS server')
+        for role in roles:
+            result = self.replicas[0].run_command([
+                'ipa', 'server-role-find',
+                '--server', host.hostname,
+                '--role', role
+            ])
+            expected = 'Role status: {}'.format(status)
+            assert expected in result.stdout_text
+
+    def _check_config(self, enabled=(), hidden=()):
+        enabled = {host.hostname for host in enabled}
+        hidden = {host.hostname for host in hidden}
+        services = [
+            'IPA masters', 'IPA CA servers', 'IPA KRA servers',
+            'IPA DNS servers'
+        ]
+
+        result = self.replicas[0].run_command(['ipa', 'config-show'])
+        values = {}
+        for line in result.stdout_text.split('\n'):
+            if ':' not in line:
+                continue
+            k, v = line.split(':', 1)
+            values[k.strip()] = {item.strip() for item in v.split(',')}
+
+        for service in services:
+            hservice = 'Hidden {}'.format(service)
+            assert values.get(service, set()) == enabled
+            assert values.get(hservice, set()) == hidden
+
+    def test_hidden_replica_install(self):
+        # TODO: check that all services are running on hidden replica
+        self._check_server_role(self.master, 'enabled')
+        self._check_server_role(self.replicas[0], 'hidden')
+        self._check_dnsrecords([self.master], [self.replicas[0]])
+        self._check_config([self.master], [self.replicas[0]])
+
+    def test_hide_master_fails(self):
+        # verify state
+        self._check_config([self.master], [self.replicas[0]])
+        # nothing to do
+        result = self.master.run_command([
+            'ipa', 'server-state',
+            self.master.hostname, '--state=enabled'
+        ], raiseonerr=False)
+        assert result.returncode == 1
+        assert "no modifications to be performed" in result.stderr_text
+        # hiding the last master fails
+        result = self.master.run_command([
+            'ipa', 'server-state',
+            self.master.hostname, '--state=hidden'
+        ], raiseonerr=False)
+        assert result.returncode == 1
+        keys = [
+            "CA renewal master", "DNSSec key master", "CA server",
+            "KRA server", "DNS server", "IPA server"
+        ]
+        for key in keys:
+            assert key in result.stderr_text
+
+    def test_hidden_replica_promote(self):
+        self.replicas[0].run_command([
+            'ipa', 'server-state',
+            self.replicas[0].hostname, '--state=enabled'
+        ])
+        self._check_server_role(self.replicas[0], 'enabled')
+        self._check_dnsrecords([self.master, self.replicas[0]])
+        self._check_config([self.master, self.replicas[0]])
+
+        result = self.replicas[0].run_command([
+            'ipa', 'server-state',
+            self.replicas[0].hostname, '--state=enabled'
+        ], raiseonerr=False)
+        assert result.returncode == 1
+        assert 'no modifications to be performed' in result.stderr_text
+
+    def test_hidden_replica_demote(self):
+        self.replicas[0].run_command([
+            'ipa', 'server-state',
+            self.replicas[0].hostname, '--state=hidden'
+        ])
+        self._check_server_role(self.replicas[0], 'hidden')
+        self._check_dnsrecords([self.master], [self.replicas[0]])
+
+    def test_replica_from_hidden(self):
+        # install a replica from a hidden replica
+        self._check_server_role(self.replicas[0], 'hidden')
+        tasks.install_replica(
+            master=self.replicas[0],
+            replica=self.replicas[1],
+            setup_dns=True
+        )
+        self._check_server_role(self.replicas[0], 'hidden')
+        self._check_server_role(
+            self.replicas[1], 'enabled', kra=False, dns=False
+        )
+        self._check_dnsrecords(
+            [self.master, self.replicas[1]], [self.replicas[0]]
+        )
+        # hide the new replica
+        self.replicas[0].run_command([
+            'ipa', 'server-state',
+            self.replicas[1].hostname, '--state=hidden'
+        ])
+        # and establish replication agreements from master
+        tasks.connect_replica(
+            master=self.master,
+            replica=self.replicas[1],
+        )
+        tasks.connect_replica(
+            master=self.master,
+            replica=self.replicas[1],
+            database=CA_SUFFIX_NAME,
+        )
+        # remove replication agreements again
+        tasks.disconnect_replica(
+            master=self.master,
+            replica=self.replicas[1],
+        )
+        tasks.disconnect_replica(
+            master=self.master,
+            replica=self.replicas[1],
+            database=CA_SUFFIX_NAME,
+        )
+        # and uninstall
+        tasks.uninstall_replica(
+            master=self.replicas[0],
+            replica=self.replicas[1],
+        )
+
+    def test_hidden_replica_backup_and_restore(self):
+        """Exercises backup+restore and hidden replica uninstall
+        """
+        self._check_server_role(self.replicas[0], 'hidden')
+        # backup
+        backup_path = backup(self.replicas[0])
+        # uninstall
+        tasks.uninstall_master(self.replicas[0])
+        # restore
+        dirman_password = self.master.config.dirman_password
+        self.replicas[0].run_command(
+            ['ipa-restore', backup_path],
+            stdin_text=dirman_password + '\nyes'
+        )
+
+        # give replication some time
+        time.sleep(5)
+        tasks.kinit_admin(self.replicas[0])
+
+        # FIXME: restore turns hidden replica into enabled replica
+        self._check_config([self.master, self.replicas[0]])
+        self._check_server_role(self.replicas[0], 'enabled')
+
+    def test_hidden_replica_automatic_crl(self):
+        """Exercises if automatic CRL configuration works with
+           hidden replica.
+        """
+        # Demoting Replica to be hidden.
+        self.replicas[0].run_command([
+            'ipa', 'server-state',
+            self.replicas[0].hostname, '--state=hidden'
+        ])
+        self._check_server_role(self.replicas[0], 'hidden')
+
+        # check CRL status
+        result = self.replicas[0].run_command([
+            'ipa-crlgen-manage', 'status'])
+        assert "CRL generation: disabled" in result.stdout_text
+
+        # Enbable CRL status on hidden replica
+        self.replicas[0].run_command([
+            'ipa-crlgen-manage', 'enable'])
+
+        # check CRL status
+        result = self.replicas[0].run_command([
+            'ipa-crlgen-manage', 'status'])
+        assert "CRL generation: enabled" in result.stdout_text

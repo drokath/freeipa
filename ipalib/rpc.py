@@ -45,7 +45,6 @@ import gzip
 from cryptography import x509 as crypto_x509
 
 import gssapi
-from dns import resolver, rdatatype
 from dns.exception import DNSException
 from ssl import SSLError
 import six
@@ -61,7 +60,7 @@ from ipalib.x509 import Encoding as x509_Encoding
 from ipapython import ipautil
 from ipapython import session_storage
 from ipapython.cookie import Cookie
-from ipapython.dnsutil import DNSName
+from ipapython.dnsutil import DNSName, query_srv
 from ipalib.text import _
 from ipalib.util import create_https_connection
 from ipalib.krb_utils import KRB5KDC_ERR_S_PRINCIPAL_UNKNOWN, KRB5KRB_AP_ERR_TKT_EXPIRED, \
@@ -713,8 +712,15 @@ class KerbTransport(SSLTransport):
                     response = h.getresponse()
 
                 if response.status != 200:
-                    if (response.getheader("content-length", 0)):
-                        response.read()
+                    # Must read response (even if it is empty)
+                    # before sending another request.
+                    #
+                    # https://docs.python.org/3/library/http.client.html
+                    #   #http.client.HTTPConnection.getresponse
+                    #
+                    # https://pagure.io/freeipa/issue/7752
+                    #
+                    response.read()
 
                     if response.status == 401:
                         if not self._auth_complete(response):
@@ -878,7 +884,7 @@ class RPCClient(Connectible):
         name = '_ldap._tcp.%s.' % self.env.domain
 
         try:
-            answers = resolver.query(name, rdatatype.SRV)
+            answers = query_srv(name)
         except DNSException:
             answers = []
 
@@ -886,17 +892,11 @@ class RPCClient(Connectible):
             server = str(answer.target).rstrip(".")
             servers.append('https://%s%s' % (ipautil.format_netloc(server), path))
 
-        servers = list(set(servers))
-        # the list/set conversion won't preserve order so stick in the
-        # local config file version here.
-        cfg_server = rpc_uri
-        if cfg_server in servers:
-            # make sure the configured master server is there just once and
-            # it is the first one
-            servers.remove(cfg_server)
-            servers.insert(0, cfg_server)
-        else:
-            servers.insert(0, cfg_server)
+        # make sure the configured master server is there just once and
+        # it is the first one.
+        if rpc_uri in servers:
+            servers.remove(rpc_uri)
+        servers.insert(0, rpc_uri)
 
         return servers
 
@@ -1078,9 +1078,11 @@ class RPCClient(Connectible):
                             )
                     # We don't care about the response, just that we got one
                     return serverproxy
+                # pylint: disable=try-except-raise
                 except errors.KerberosError:
                     # kerberos error on one server is likely on all
                     raise
+                # pylint: enable=try-except-raise
                 except ProtocolError as e:
                     if hasattr(context, 'session_cookie') and e.errcode == 401:
                         # Unauthorized. Remove the session and try again.
@@ -1170,11 +1172,11 @@ class RPCClient(Connectible):
                     try:
                         principal = getattr(context, 'principal', None)
                         delete_persistent_client_session_data(principal)
-                    except Exception as e:
+                    except Exception as e2:
                         # This shouldn't happen if we have a session
                         # but it isn't fatal.
                         logger.debug("Error trying to remove persisent "
-                                     "session data: %s", e)
+                                     "session data: %s", e2)
 
                     # Create a new serverproxy with the non-session URI
                     serverproxy = self.create_connection(

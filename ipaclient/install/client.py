@@ -33,6 +33,7 @@ from six.moves.urllib.parse import urlparse, urlunparse
 # pylint: enable=import-error
 
 from ipalib import api, errors, x509
+from ipalib.constants import IPAAPI_USER
 from ipalib.install import certmonger, certstore, service, sysrestore
 from ipalib.install import hostname as hostname_
 from ipalib.install.kinit import kinit_keytab, kinit_password
@@ -522,19 +523,24 @@ def configure_openldap_conf(fstore, cli_basedn, cli_server):
         {
             'name': 'comment',
             'type': 'comment',
-            'value': '   URI, BASE and TLS_CACERT have been added if they '
-                     'were not set.'
+            'value': '   URI, BASE, TLS_CACERT and SASL_MECH'
         },
         {
             'name': 'comment',
             'type': 'comment',
-            'value': '   In case any of them were set, a comment with '
-                     'trailing note'
+            'value': '   have been added if they were not set.'
         },
         {
             'name': 'comment',
             'type': 'comment',
-            'value': '   "# modified by IPA" note has been inserted.'
+            'value': '   In case any of them were set, a comment has been '
+                     'inserted and'
+        },
+        {
+            'name': 'comment',
+            'type': 'comment',
+            'value': '   "# CONF_NAME modified by IPA" added to the line '
+                     'above.'
         },
         {
             'name': 'comment',
@@ -572,6 +578,12 @@ def configure_openldap_conf(fstore, cli_basedn, cli_server):
             'name': 'TLS_CACERT',
             'type': 'option',
             'value': paths.IPA_CA_CRT
+        },
+        {
+            'action': 'addifnotset',
+            'name': 'SASL_MECH',
+            'type': 'option',
+            'value': 'GSSAPI'
         },
     ]
 
@@ -775,6 +787,7 @@ def configure_certmonger(
     cmonger = services.knownservices.certmonger
     try:
         cmonger.enable()
+        cmonger.start()
     except Exception as e:
         logger.error(
             "Failed to configure automatic startup of the %s daemon: %s",
@@ -786,14 +799,24 @@ def configure_certmonger(
     subject = str(DN(('CN', hostname), subject_base))
     passwd_fname = os.path.join(paths.IPA_NSSDB_DIR, 'pwdfile.txt')
     try:
-        certmonger.request_cert(
+        certmonger.request_and_wait_for_cert(
             certpath=paths.IPA_NSSDB_DIR,
-            nickname='Local IPA host', subject=subject, dns=[hostname],
-            principal=principal, passwd_fname=passwd_fname)
-    except Exception as ex:
-        logger.error(
-            "%s request for host certificate failed: %s",
-            cmonger.service_name, ex)
+            storage='NSSDB',
+            nickname='Local IPA host',
+            subject=subject,
+            dns=[hostname],
+            principal=principal,
+            passwd_fname=passwd_fname,
+            resubmit_timeout=120,
+        )
+    except Exception as e:
+        logger.exception("certmonger request failed")
+        raise ScriptError(
+            "{} request for host certificate failed: {}".format(
+                cmonger.service_name, e
+            ),
+            rval=CLIENT_INSTALL_ERROR
+        )
 
 
 def configure_sssd_conf(
@@ -854,7 +877,7 @@ def configure_sssd_conf(
         domain = sssdconfig.new_domain(cli_domain)
 
     if options.on_master:
-        sssd_enable_service(sssdconfig, 'ifp')
+        sssd_enable_ifp(sssdconfig)
 
     if (
         (options.conf_ssh and os.path.isfile(paths.SSH_CONFIG)) or
@@ -958,21 +981,47 @@ def configure_sssd_conf(
     return 0
 
 
-def sssd_enable_service(sssdconfig, service):
+def sssd_enable_service(sssdconfig, name):
     try:
-        sssdconfig.new_service(service)
+        sssdconfig.new_service(name)
     except SSSDConfig.ServiceAlreadyExists:
         pass
     except SSSDConfig.ServiceNotRecognizedError:
         logger.error(
-            "Unable to activate the %s service in SSSD config.", service)
+            "Unable to activate the '%s' service in SSSD config.", name)
         logger.info(
             "Please make sure you have SSSD built with %s support "
-            "installed.", service)
+            "installed.", name)
         logger.info(
-            "Configure %s support manually in /etc/sssd/sssd.conf.", service)
+            "Configure %s support manually in /etc/sssd/sssd.conf.", name)
+        return None
 
-    sssdconfig.activate_service(service)
+    sssdconfig.activate_service(name)
+    return sssdconfig.get_service(name)
+
+
+def sssd_enable_ifp(sssdconfig):
+    """Enable and configure libsss_simpleifp plugin
+    """
+    service = sssd_enable_service(sssdconfig, 'ifp')
+    if service is None:
+        # unrecognized service
+        return
+
+    try:
+        uids = service.get_option('allowed_uids')
+    except SSSDConfig.NoOptionError:
+        uids = set()
+    else:
+        uids = {s.strip() for s in uids.split(',') if s.strip()}
+    # SSSD supports numeric and string UIDs
+    # ensure that root is allowed to access IFP, might be 0 or root
+    if uids.isdisjoint({'0', 'root'}):
+        uids.add('root')
+    # allow IPA API to access IFP
+    uids.add(IPAAPI_USER)
+    service.set_option('allowed_uids', ', '.join(sorted(uids)))
+    sssdconfig.save_service(service)
 
 
 def change_ssh_config(filename, changes, sections):
@@ -1044,7 +1093,6 @@ def configure_ssh_config(fstore, options):
         changes['GlobalKnownHostsFile'] = paths.SSSD_PUBCONF_KNOWN_HOSTS
     if options.trust_sshfp:
         changes['VerifyHostKeyDNS'] = 'yes'
-        changes['HostKeyAlgorithms'] = 'ssh-rsa,ssh-dss'
 
     change_ssh_config(paths.SSH_CONFIG, changes, ['Host', 'Match'])
     logger.info('Configured %s', paths.SSH_CONFIG)
@@ -1086,7 +1134,7 @@ def configure_sshd_config(fstore, options):
         )
 
         for candidate in candidates:
-            args = ['sshd', '-t', '-f', os.devnull]
+            args = [paths.SSHD, '-t', '-f', os.devnull]
             for item in candidate.items():
                 args.append('-o')
                 args.append('%s=%s' % item)
@@ -1118,7 +1166,7 @@ def configure_automount(options):
     logger.info('\nConfiguring automount:')
 
     args = [
-        'ipa-client-automount', '--debug', '-U', '--location',
+        paths.IPA_CLIENT_AUTOMOUNT, '--debug', '-U', '--location',
         options.location
     ]
 
@@ -1468,12 +1516,13 @@ def update_ssh_keys(hostname, ssh_dir, create_sshfp):
             continue
 
         for line in f:
-            line = line[:-1].lstrip()
+            line = line.strip()
             if not line or line.startswith('#'):
                 continue
             try:
                 pubkey = SSHPublicKey(line)
-            except (ValueError, UnicodeDecodeError):
+            except (ValueError, UnicodeDecodeError) as e:
+                logger.debug("Decoding line '%s' failed: %s", line, e)
                 continue
             logger.info("Adding SSH public key from %s", filename)
             pubkeys.append(pubkey)
@@ -1826,14 +1875,14 @@ def get_ca_certs(fstore, options, server, basedn, realm):
 
     if ca_certs is not None:
         try:
-            x509.write_certificate_list(ca_certs, ca_file)
+            x509.write_certificate_list(ca_certs, ca_file, mode=0o644)
         except Exception as e:
             if os.path.exists(ca_file):
                 try:
                     os.unlink(ca_file)
-                except OSError as e:
+                except OSError as e2:
                     logger.error(
-                        "Failed to remove '%s': %s", ca_file, e)
+                        "Failed to remove '%s': %s", ca_file, e2)
             raise errors.FileError(
                 reason=u"cannot write certificate file '%s': %s" % (
                     ca_file, e)
@@ -2022,7 +2071,7 @@ def install_check(options):
             rval=CLIENT_INSTALL_ERROR
         )
 
-    if (hostname == 'localhost') or (hostname == 'localhost.localdomain'):
+    if hostname in ('localhost', 'localhost.localdomain'):
         raise ScriptError(
             "Invalid hostname, '{}' must not be used.".format(hostname),
             rval=CLIENT_INSTALL_ERROR)
@@ -2764,10 +2813,14 @@ def _install(options):
 
     x509.write_certificate_list(
         [c for c, n, t, u in ca_certs if t is not False],
-        paths.KDC_CA_BUNDLE_PEM)
+        paths.KDC_CA_BUNDLE_PEM,
+        mode=0o644
+    )
     x509.write_certificate_list(
         [c for c, n, t, u in ca_certs if t is not False],
-        paths.CA_BUNDLE_PEM)
+        paths.CA_BUNDLE_PEM,
+        mode=0o644
+    )
 
     # Add the CA certificates to the IPA NSS database
     logger.debug("Adding CA certificates to the IPA NSS database.")
@@ -2911,7 +2964,7 @@ def _install(options):
             # Particulary, SSSD might take longer than 6-8 seconds.
             while n < 10 and not found:
                 try:
-                    ipautil.run(["getent", "passwd", user])
+                    ipautil.run([paths.GETENT, "passwd", user])
                     found = True
                 except Exception as e:
                     time.sleep(1)
@@ -2993,7 +3046,7 @@ def uninstall(options):
     statestore = sysrestore.StateFile(paths.IPA_CLIENT_SYSRESTORE)
 
     try:
-        run(["ipa-client-automount", "--uninstall", "--debug"])
+        run([paths.IPA_CLIENT_AUTOMOUNT, "--uninstall", "--debug"])
     except Exception as e:
         logger.error(
             "Unconfigured automount client failed: %s", str(e))

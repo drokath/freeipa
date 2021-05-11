@@ -123,7 +123,7 @@ from ipalib.text import Gettext, FixMe
 from ipalib.util import json_serialize, validate_idna_domain
 from ipalib.x509 import (
     load_der_x509_certificate, IPACertificate, default_backend)
-from ipalib.util import strip_csr_header
+from ipalib.util import strip_csr_header, apirepr
 from ipapython import kerberos
 from ipapython.dn import DN
 from ipapython.dnsutil import DNSName
@@ -559,7 +559,7 @@ class Param(ReadOnly):
         # Check that all the rules are callable
         self.class_rules = tuple(class_rules)
         self.rules = rules
-        if self.query:
+        if self.query:  # pylint: disable=using-constant-test
             # by definition a query enforces no class or parameter rules
             self.all_rules = ()
         else:
@@ -600,9 +600,12 @@ class Param(ReadOnly):
             elif isinstance(value, six.integer_types):
                 value = str(value)
             elif isinstance(value, (tuple, set, frozenset)):
-                value = repr(list(value))
-            else:
+                value = apirepr(list(value))
+            elif key == 'cli_name':
+                # always represented as native string
                 value = repr(value)
+            else:
+                value = apirepr(value)
             yield '%s=%s' % (key, value)
 
     def __call__(self, value, **kw):
@@ -758,10 +761,10 @@ class Param(ReadOnly):
 
         :param value: A proposed value for this parameter.
         """
-        if self.multivalue:
+        if self.multivalue:  # pylint: disable=using-constant-test
             if type(value) not in (tuple, list):
                 value = (value,)
-        if self.multivalue:
+        if self.multivalue:  # pylint: disable=using-constant-test
             return tuple(
                 self._normalize_scalar(v) for v in value
             )
@@ -837,7 +840,7 @@ class Param(ReadOnly):
 
         if _is_null(value):
             return
-        if self.multivalue:
+        if self.multivalue:  # pylint: disable=using-constant-test
             if type(value) not in (tuple, list):
                 value = (value,)
             values = tuple(
@@ -869,10 +872,10 @@ class Param(ReadOnly):
             if self.required or (supplied and 'nonempty' in self.flags):
                 raise RequirementError(name=self.name)
             return
-        if self.deprecated:
+        if self.deprecated:  # pylint: disable=using-constant-test
             raise ValidationError(name=self.get_param_name(),
                                   error=_('this option is deprecated'))
-        if self.multivalue:
+        if self.multivalue:  # pylint: disable=using-constant-test
             if type(value) is not tuple:
                 raise TypeError(
                     TYPE_ERROR % ('value', tuple, value, type(value))
@@ -966,8 +969,8 @@ class Param(ReadOnly):
         for a, k, _d in self.kwargs:
             if k in (callable, DefaultFrom):
                 continue
-            elif isinstance(getattr(self, a), frozenset):
-                json_dict[a] = [k for k in getattr(self, a, [])]
+            if isinstance(getattr(self, a), frozenset):
+                json_dict[a] = list(getattr(self, a, []))
             else:
                 val = getattr(self, a, '')
                 if val is None:
@@ -1750,16 +1753,28 @@ class Any(Param):
 
 
 class File(Str):
-    """
-    File parameter type.
+    """Text file parameter type.
 
     Accepts file names and loads their content into the parameter value.
     """
+    open_mode = 'r'
     kwargs = Data.kwargs + (
         # valid for CLI, other backends (e.g. webUI) can ignore this
         ('stdin_if_missing', bool, False),
         ('noextrawhitespace', bool, False),
     )
+
+
+class BinaryFile(Bytes):
+    """Binary file parameter type
+    """
+    open_mode = 'rb'
+    kwargs = Data.kwargs + (
+        # valid for CLI, other backends (e.g. webUI) can ignore this
+        ('stdin_if_missing', bool, False),
+        ('noextrawhitespace', bool, False),
+    )
+
 
 class DateTime(Param):
     """
@@ -1990,7 +2005,6 @@ class AccessTime(Str):
             raise ValidationError(
                 name=self.get_param_name(), error=ugettext('incomplete time value')
             )
-        return None
 
 
 class DNParam(Param):

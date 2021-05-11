@@ -481,20 +481,21 @@ def run(args, stdin=None, raiseonerr=True, nolog=(), env=None,
     logger.debug('Starting external process')
     logger.debug('args=%s', arg_string)
 
+    if runas is not None:
+        pent = pwd.getpwnam(runas)
+
+        suplementary_gids = [
+            grp.getgrnam(sgroup).gr_gid for sgroup in suplementary_groups
+        ]
+
+        logger.debug('runas=%s (UID %d, GID %s)', runas,
+                     pent.pw_uid, pent.pw_gid)
+        if suplementary_groups:
+            for group, gid in zip(suplementary_groups, suplementary_gids):
+                logger.debug('suplementary_group=%s (GID %d)', group, gid)
+
     def preexec_fn():
         if runas is not None:
-            pent = pwd.getpwnam(runas)
-
-            suplementary_gids = [
-                grp.getgrnam(group).gr_gid for group in suplementary_groups
-            ]
-
-            logger.debug('runas=%s (UID %d, GID %s)', runas,
-                         pent.pw_uid, pent.pw_gid)
-            if suplementary_groups:
-                for group, gid in zip(suplementary_groups, suplementary_gids):
-                    logger.debug('suplementary_group=%s (GID %d)', group, gid)
-
             os.setgroups(suplementary_gids)
             os.setregid(pent.pw_gid, pent.pw_gid)
             os.setreuid(pent.pw_uid, pent.pw_uid)
@@ -503,6 +504,7 @@ def run(args, stdin=None, raiseonerr=True, nolog=(), env=None,
             os.umask(umask)
 
     try:
+        # pylint: disable=subprocess-popen-preexec-fn
         p = subprocess.Popen(args, stdin=p_in, stdout=p_out, stderr=p_err,
                              close_fds=True, env=env, cwd=cwd,
                              preexec_fn=preexec_fn)
@@ -1486,7 +1488,7 @@ class APIVersion(tuple):
         return "<APIVersion('{}.{}')>".format(*self)
 
     def __getnewargs__(self):
-        return str(self)
+        return (str(self),)
 
     @property
     def major(self):

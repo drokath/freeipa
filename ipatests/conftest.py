@@ -16,23 +16,17 @@ try:
     import ipaplatform  # pylint: disable=unused-import
 except ImportError:
     ipaplatform = None
-try:
-    import ipaserver
-    from ipaserver.install import installutils
-except ImportError:
-    ipaserver = None
+
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 pytest_plugins = [
-    'ipatests.pytest_plugins.additional_config',
-    'ipatests.pytest_plugins.beakerlib',
-    'ipatests.pytest_plugins.declarative',
-    'ipatests.pytest_plugins.nose_compat',
+    'ipatests.pytest_ipa.additional_config',
+    'ipatests.pytest_ipa.beakerlib',
+    'ipatests.pytest_ipa.declarative',
+    'ipatests.pytest_ipa.nose_compat',
+    'ipatests.pytest_ipa.integration'
 ]
-# The integration plugin is not available in client-only builds.
-if ipaserver is not None:
-    pytest_plugins.append('ipatests.pytest_plugins.integration')
 
 
 MARKERS = [
@@ -56,7 +50,7 @@ NO_RECURSE_DIRS = [
     # install/share/wsgi.py
     'install/share',
     # integration plugin imports from ipaplatform
-    'ipatests/pytest_plugins',
+    'ipatests/pytest_ipa',
 ]
 
 
@@ -112,7 +106,7 @@ def pytest_cmdline_main(config):
 
     # XXX workaround until https://fedorahosted.org/freeipa/ticket/6408 has
     # been resolved.
-    if ipaserver is not None and installutils.is_ipa_configured():
+    if os.path.isfile(api.env.conf_default):
         api.finalize()
 
     if config.option.verbose:
@@ -125,12 +119,18 @@ def pytest_cmdline_main(config):
 
 
 def pytest_runtest_setup(item):
-    if isinstance(item, item.Function):
-        if item.get_marker('skip_ipaclient_unittest'):
+    if isinstance(item, pytest.Function):
+        # pytest 3.6 has deprecated get_marker in 3.6. The method was
+        # removed in 4.x and replaced with get_closest_marker.
+        if hasattr(item, 'get_closest_marker'):
+            get_marker = item.get_closest_marker  # pylint: disable=no-member
+        else:
+            get_marker = item.get_marker  # pylint: disable=no-member
+        if get_marker('skip_ipaclient_unittest'):
             # pylint: disable=no-member
             if pytest.config.option.ipaclient_unittests:
                 pytest.skip("Skip in ipaclient unittest mode")
-        if item.get_marker('needs_ipaapi'):
+        if get_marker('needs_ipaapi'):
             # pylint: disable=no-member
             if pytest.config.option.skip_ipaapi:
                 pytest.skip("Skip tests that needs an IPA API")

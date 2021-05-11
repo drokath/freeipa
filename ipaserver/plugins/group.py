@@ -20,6 +20,8 @@
 
 import six
 
+import logging
+
 from ipalib import api
 from ipalib import Int, Str, Flag
 from ipalib.constants import PATTERN_GROUPUSER_NAME
@@ -47,6 +49,8 @@ from ipapython.dn import DN
 
 if six.PY3:
     unicode = str
+
+logger = logging.getLogger(__name__)
 
 if api.env.in_server and api.env.context in ['lite', 'server']:
     try:
@@ -137,6 +141,7 @@ Example:
 
 register = Registry()
 
+# also see "System: Remove Groups"
 PROTECTED_GROUPS = (u'admins', u'trust admins', u'default smb group')
 
 
@@ -160,6 +165,9 @@ class group(LDAPObject):
     object_class_config = 'ipagroupobjectclasses'
     possible_objectclasses = ['posixGroup', 'mepManagedEntry', 'ipaExternalGroup']
     permission_filter_objectclasses = ['posixgroup', 'ipausergroup']
+    permission_filter_objectclasses_string = (
+        '(|(objectclass=ipausergroup)(objectclass=posixgroup))'
+    )
     search_attributes_config = 'ipagroupsearchfields'
     default_attributes = [
         'cn', 'description', 'gidnumber', 'member', 'memberof',
@@ -211,7 +219,7 @@ class group(LDAPObject):
         'System: Modify Group Membership': {
             'ipapermright': {'write'},
             'ipapermtargetfilter': [
-                '(objectclass=ipausergroup)',
+                '(objectclass=ipausergroup)',  # only ipausergroups
                 '(!(cn=admins))',
             ],
             'ipapermdefaultattr': {'member'},
@@ -235,6 +243,10 @@ class group(LDAPObject):
         },
         'System: Modify Groups': {
             'ipapermright': {'write'},
+            'ipapermtargetfilter': [
+                permission_filter_objectclasses_string,
+                '(!(cn=admins))',
+            ],
             'ipapermdefaultattr': {
                 'cn', 'description', 'gidnumber', 'ipauniqueid',
                 'mepmanagedby', 'objectclass'
@@ -246,6 +258,11 @@ class group(LDAPObject):
         },
         'System: Remove Groups': {
             'ipapermright': {'delete'},
+            'ipapermtargetfilter': [
+                permission_filter_objectclasses_string,
+                # prevent removal of PROTECTED_GROUPS
+                '(!(|(cn=admins)(cn=trust admins)(cn=default smb group)))',
+            ],
             'replaces': [
                 '(target = "ldap:///cn=*,cn=groups,cn=accounts,$SUFFIX")(version 3.0;acl "permission:Remove Groups";allow (delete) groupdn = "ldap:///cn=Remove Groups,cn=permissions,cn=pbac,$SUFFIX";)',
             ],
@@ -366,7 +383,16 @@ class group_del(LDAPDelete):
     def post_callback(self, ldap, dn, *keys, **options):
         assert isinstance(dn, DN)
         try:
+            # A user removing a group may have no rights to remove
+            # an associated policy. Make sure we log an explanation
+            # in the Apache logs for this.
             api.Command['pwpolicy_del'](keys[-1])
+        except errors.ACIError:
+            logger.warning(
+                "While removing group %s, user lacked permissions "
+                "to remove corresponding password policy. This is "
+                "not an issue and can be ignored.", keys[-1]
+            )
         except errors.NotFound:
             pass
 

@@ -22,6 +22,8 @@
 This module contains default platform-specific implementations of system tasks.
 '''
 
+from __future__ import absolute_import
+
 import logging
 
 from pkg_resources import parse_version
@@ -89,22 +91,38 @@ class BaseTaskNamespace(object):
 
         return paths.SVC_LIST_FILE
 
-    def check_selinux_status(self):
+    def is_selinux_enabled(self):
+        """Check if SELinux is available and enabled
+
+        :return: True if SELinux is available and enabled
         """
-        Checks if SELinux is available on the platform. If it is, this task
-        also makes sure that restorecon tool is available.
+        return False
+
+    def check_selinux_status(self):
+        """Checks if SELinux is available on the platform.
+
+        If it is, this task also makes sure that restorecon tool is available.
 
         If SELinux is available, but restorcon tool is not installed, raises
         an RuntimeError, which suggest installing the package containing
         restorecon and rerunning the installation.
-        """
 
+        :return: True if SELinux is available and enabled
+        """
         raise NotImplementedError()
 
     def check_ipv6_stack_enabled(self):
         """Check whether IPv6 kernel module is loaded"""
 
         raise NotImplementedError()
+
+    def detect_container(self):
+        """Check if running inside a container
+
+        :returns: container runtime or None
+        :rtype: str, None
+        """
+        raise NotImplementedError
 
     def restore_hostname(self, fstore, statestore):
         """
@@ -209,6 +227,10 @@ class BaseTaskNamespace(object):
 
     def remove_httpd_service_ipa_conf(self):
         """Remove configuration of httpd service of IPA"""
+        raise NotImplementedError()
+
+    def configure_httpd_wsgi_conf(self):
+        """Configure WSGI for correct Python version"""
         raise NotImplementedError()
 
     def is_fips_enabled(self):

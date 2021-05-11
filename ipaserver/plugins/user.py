@@ -18,6 +18,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from __future__ import absolute_import
+
 import logging
 import time
 from time import gmtime, strftime
@@ -67,6 +69,7 @@ from ipapython.dn import DN
 from ipapython.ipaldap import LDAPClient
 from ipapython.ipautil import ipa_generate_password, TMP_PWD_ENTROPY_BITS
 from ipalib.capabilities import client_has_capability
+from ipaserver.masters import get_masters
 
 if six.PY3:
     unicode = str
@@ -121,6 +124,12 @@ register = Registry()
 
 user_output_params = baseuser_output_params
 
+MEMBEROF_ADMINS = "(memberOf={})".format(
+    DN('cn=admins', api.env.container_group, api.env.basedn)
+)
+
+NOT_MEMBEROF_ADMINS = '(!{})'.format(MEMBEROF_ADMINS)
+
 
 def check_protected_member(user, protected_group_name=u'admins'):
     '''
@@ -151,6 +160,7 @@ class user(baseuser):
     label_singular            = _('User')
     object_name               = _('user')
     object_name_plural        = _('users')
+    permission_filter_objectclasses_string = '(objectclass=posixaccount)'
     managed_permissions = {
         'System: Read User Standard Attributes': {
             'replaces_global_anonymous_aci': True,
@@ -255,10 +265,8 @@ class user(baseuser):
         'System: Change User password': {
             'ipapermright': {'write'},
             'ipapermtargetfilter': [
-                '(objectclass=posixaccount)',
-                '(!(memberOf=%s))' % DN('cn=admins',
-                                        api.env.container_group,
-                                        api.env.basedn),
+                permission_filter_objectclasses_string,
+                NOT_MEMBEROF_ADMINS,
             ],
             'ipapermdefaultattr': {
                 'krbprincipalkey', 'passwordhistory', 'sambalmpassword',
@@ -275,8 +283,25 @@ class user(baseuser):
                 'PassSync Service',
             },
         },
+        'System: Change Admin User password': {
+            'ipapermright': {'write'},
+            'ipapermtargetfilter': [
+                MEMBEROF_ADMINS,
+            ],
+            'ipapermdefaultattr': {
+                'krbprincipalkey', 'passwordhistory', 'sambalmpassword',
+                'sambantpassword', 'userpassword', 'krbpasswordexpiration'
+            },
+            'default_privileges': {
+                'PassSync Service',
+            },
+        },
         'System: Manage User SSH Public Keys': {
             'ipapermright': {'write'},
+            'ipapermtargetfilter': [
+                permission_filter_objectclasses_string,
+                NOT_MEMBEROF_ADMINS,
+            ],
             'ipapermdefaultattr': {'ipasshpubkey'},
             'replaces': [
                 '(targetattr = "ipasshpubkey")(target = "ldap:///uid=*,cn=users,cn=accounts,$SUFFIX")(version 3.0;acl "permission:Manage User SSH Public Keys";allow (write) groupdn = "ldap:///cn=Manage User SSH Public Keys,cn=permissions,cn=pbac,$SUFFIX";)',
@@ -285,6 +310,10 @@ class user(baseuser):
         },
         'System: Manage User Certificates': {
             'ipapermright': {'write'},
+            'ipapermtargetfilter': [
+                permission_filter_objectclasses_string,
+                NOT_MEMBEROF_ADMINS,
+            ],
             'ipapermdefaultattr': {'usercertificate'},
             'default_privileges': {
                 'User Administrators',
@@ -293,6 +322,10 @@ class user(baseuser):
         },
         'System: Manage User Principals': {
             'ipapermright': {'write'},
+            'ipapermtargetfilter': [
+                permission_filter_objectclasses_string,
+                NOT_MEMBEROF_ADMINS,
+            ],
             'ipapermdefaultattr': {'krbprincipalname', 'krbcanonicalname'},
             'default_privileges': {
                 'User Administrators',
@@ -301,16 +334,20 @@ class user(baseuser):
         },
         'System: Modify Users': {
             'ipapermright': {'write'},
+            'ipapermtargetfilter': [
+                permission_filter_objectclasses_string,
+                NOT_MEMBEROF_ADMINS,
+            ],
             'ipapermdefaultattr': {
                 'businesscategory', 'carlicense', 'cn', 'departmentnumber',
                 'description', 'displayname', 'employeetype',
                 'employeenumber', 'facsimiletelephonenumber',
-                'gecos', 'givenname', 'homephone', 'inetuserhttpurl',
-                'initials', 'l', 'labeleduri', 'loginshell', 'manager', 'mail',
-                'mepmanagedentry', 'mobile', 'objectclass', 'ou', 'pager',
-                'postalcode', 'roomnumber', 'secretary', 'seealso', 'sn', 'st',
-                'street', 'telephonenumber', 'title', 'userclass',
-                'preferredlanguage',
+                'gecos', 'givenname', 'homedirectory', 'homephone',
+                'inetuserhttpurl', 'initials', 'l', 'labeleduri', 'loginshell',
+                'manager', 'mail', 'mepmanagedentry', 'mobile', 'objectclass',
+                'ou', 'pager', 'postalcode', 'roomnumber', 'secretary',
+                'seealso', 'sn', 'st', 'street', 'telephonenumber', 'title',
+                'userclass', 'preferredlanguage'
             },
             'replaces': [
                 '(targetattr = "givenname || sn || cn || displayname || title || initials || loginshell || gecos || homephone || mobile || pager || facsimiletelephonenumber || telephonenumber || street || roomnumber || l || st || postalcode || manager || secretary || description || carlicense || labeleduri || inetuserhttpurl || seealso || employeetype || businesscategory || ou || mepmanagedentry || objectclass")(target = "ldap:///uid=*,cn=users,cn=accounts,$SUFFIX")(version 3.0;acl "permission:Modify Users";allow (write) groupdn = "ldap:///cn=Modify Users,cn=permissions,cn=pbac,$SUFFIX";)',
@@ -322,6 +359,10 @@ class user(baseuser):
         },
         'System: Remove Users': {
             'ipapermright': {'delete'},
+            'ipapermtargetfilter': [
+                permission_filter_objectclasses_string,
+                NOT_MEMBEROF_ADMINS,
+            ],
             'replaces': [
                 '(target = "ldap:///uid=*,cn=users,cn=accounts,$SUFFIX")(version 3.0;acl "permission:Remove Users";allow (delete) groupdn = "ldap:///cn=Remove Users,cn=permissions,cn=pbac,$SUFFIX";)',
             ],
@@ -329,6 +370,10 @@ class user(baseuser):
         },
         'System: Unlock User': {
             'ipapermright': {'write'},
+            'ipapermtargetfilter': [
+                permission_filter_objectclasses_string,
+                NOT_MEMBEROF_ADMINS,
+            ],
             'ipapermdefaultattr': {
                 'krblastadminunlock', 'krbloginfailedcount', 'nsaccountlock',
             },
@@ -471,7 +516,7 @@ class user_add(baseuser_add):
         else:
             raise self.obj.handle_duplicate_entry(*keys)
 
-        if not options.get('noprivate', False):
+        if not options.get('noprivate', False) and ldap.has_upg():
             try:
                 # The Managed Entries plugin will allow a user to be created
                 # even if a group has a duplicate name. This would leave a user
@@ -604,7 +649,8 @@ class user_add(baseuser_add):
         newentry = ldap.get_entry(dn, ['*'])
 
         # delete description attribute NO_UPG_MAGIC if present
-        if options.get('noprivate', False) and 'description' in newentry and \
+        if (options.get('noprivate', False) or not ldap.has_upg()) and \
+                'description' in newentry and \
                 NO_UPG_MAGIC in newentry['description']:
             newentry['description'].remove(NO_UPG_MAGIC)
             ldap.update_entry(newentry)
@@ -830,8 +876,9 @@ class user_find(baseuser_find):
                 DN(self.obj.active_container_dn, self.api.env.basedn),
                 DN(self.obj.delete_container_dn, self.api.env.basedn),
             )
-            entries[:] = [e for e in entries
-                          if any(e.dn.endswith(bd) for bd in base_dns)]
+            entries[:] = list(
+                e for e in entries if any(e.dn.endswith(bd) for bd in base_dns)
+            )
 
         self.post_common_callback(ldap, entries, lockout=False, **options)
         for entry in entries:
@@ -915,7 +962,29 @@ class user_stage(LDAPMultiQuery):
     has_output = output.standard_multi_delete
     msg_summary = _('Staged user account "%(value)s"')
 
+    # when moving from preserved to stage, some attributes may be
+    # present in the preserved entry but cannot be provided to
+    # stageuser_add
+    # For instance: dn and uid are derived from LOGIN argument
+    #    has_keytab, has_password, preserved are virtual attributes
+    #    ipauniqueid, krbcanonicalname, sshpubkeyfp, krbextradata
+    #    are automatically generated
+    #    ipacertmapdata can only be provided with user_add_certmapdata
+    ignore_attrs = [u'dn', u'uid',
+                    u'has_keytab', u'has_password', u'preserved',
+                    u'ipauniqueid', u'krbcanonicalname',
+                    u'sshpubkeyfp', u'krbextradata',
+                    u'ipacertmapdata',
+                    u'nsaccountlock']
+
     def execute(self, *keys, **options):
+
+        def _build_setattr_arg(key, val):
+            if isinstance(val, bytes):
+                return u"{}={}".format(key, val.decode('UTF-8'))
+            else:
+                return u"{}={}".format(key, val)
+
         staged = []
         failed = []
 
@@ -936,8 +1005,30 @@ class user_stage(LDAPMultiQuery):
                     value = value[0]
                 new_options[param.name] = value
 
+            # Some attributes may not be accessible through the Command
+            # options and need to be added with --setattr
+            set_attr = []
+            for userkey in user.keys():
+                if userkey in new_options or userkey in self.ignore_attrs:
+                    continue
+                value = user[userkey]
+
+                if isinstance(value, (list, tuple)):
+                    for val in value:
+                        set_attr.append(_build_setattr_arg(userkey, val))
+                else:
+                    set_attr.append(_build_setattr_arg(userkey, val))
+            if set_attr:
+                new_options[u'setattr'] = set_attr
+
             try:
                 self.api.Command.stageuser_add(*single_keys, **new_options)
+                # special handling for certmapdata
+                certmapdata = user.get(u'ipacertmapdata')
+                if certmapdata:
+                    self.api.Command.stageuser_add_certmapdata(
+                        *single_keys,
+                        ipacertmapdata=certmapdata)
                 try:
                     self.api.Command.user_del(*multi_keys, preserve=False)
                 except errors.ExecutionError:
@@ -1102,21 +1193,11 @@ class user_status(LDAPQuery):
         attr_list = ['krbloginfailedcount', 'krblastsuccessfulauth', 'krblastfailedauth', 'nsaccountlock']
 
         disabled = False
-        masters = []
-        # Get list of masters
-        try:
-            masters, _truncated = ldap.find_entries(
-                None, ['*'], DN(('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'), api.env.basedn),
-                ldap.SCOPE_ONELEVEL
-            )
-        except errors.NotFound:
-            # If this happens we have some pretty serious problems
-            logger.error('No IPA masters found!')
+        masters = get_masters(ldap)
 
         entries = []
         count = 0
-        for master in masters:
-            host = master['cn'][0]
+        for host in masters:
             if host == api.env.host:
                 other_ldap = self.obj.backend
             else:

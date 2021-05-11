@@ -24,6 +24,7 @@
 #include <sys/utsname.h>
 
 #include "ipa_kdb.h"
+#include "ipa_krb5.h"
 
 #define IPADB_GLOBAL_CONFIG_CACHE_TIME 60
 
@@ -55,6 +56,7 @@ static void ipadb_context_free(krb5_context kcontext,
         /* ldap free lcontext */
         if ((*ctx)->lcontext) {
             ldap_unbind_ext_s((*ctx)->lcontext, NULL, NULL);
+            (*ctx)->lcontext = NULL;
         }
         free((*ctx)->supp_encs);
         free((*ctx)->def_encs);
@@ -110,7 +112,7 @@ static char *ipadb_realm_to_ldapi_uri(char *realm)
     /* copy path and escape '/' to '%2f' */
     for (q = LDAPIDIR; *q; q++) {
         if (*q == '/') {
-            strncpy(p, "%2f", 3);
+            memcpy(p, "%2f", 3);
             p += 3;
         } else {
             *p = *q;
@@ -522,6 +524,7 @@ static krb5_error_code ipadb_init_module(krb5_context kcontext,
     if (!ipactx) {
         return ENOMEM;
     }
+    ipactx->magic = IPA_CONTEXT_MAGIC;
 
     /* only check for unsupported 'temporary' value for now */
     for (i = 0; db_args != NULL && db_args[i] != NULL; i++) {
@@ -585,8 +588,9 @@ static krb5_error_code ipadb_init_module(krb5_context kcontext,
 
     ret = ipadb_get_connection(ipactx);
     if (ret != 0) {
-        /* not a fatal failure, as the LDAP server may be temporarily down */
-        /* TODO: spam syslog with this error */
+        /* Not a fatal failure, as the LDAP server may be temporarily down. */
+        krb5_klog_syslog(LOG_INFO,
+                         "Didn't connect to LDAP on startup: %d", ret);
     }
 
     kerr = krb5_db_set_context(kcontext, ipactx);

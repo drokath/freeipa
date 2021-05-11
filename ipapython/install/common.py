@@ -7,12 +7,11 @@ Common stuff.
 """
 
 import logging
-import traceback
 
 from . import core
 from .util import from_
 
-__all__ = ['step', 'Installable', 'Interactive', 'Continuous', 'installer',
+__all__ = ['step', 'Installable', 'Interactive', 'installer',
            'uninstaller']
 
 logger = logging.getLogger(__name__)
@@ -36,12 +35,12 @@ class Installable(core.Configurable):
 
     def _get_components(self):
         components = super(Installable, self)._get_components()
-        if self.uninstalling:
+        if self.uninstalling:  # pylint: disable=using-constant-test
             components = reversed(list(components))
         return components
 
     def _configure(self):
-        if self.uninstalling:
+        if self.uninstalling:  # pylint: disable=using-constant-test
             return self._uninstall()
         else:
             return self._install()
@@ -88,16 +87,6 @@ class Interactive(core.Configurable):
     interactive = core.Property(False)
 
 
-class Continuous(core.Configurable):
-    def _handle_execute_exception(self, exc_info):
-        try:
-            super(Continuous, self)._handle_execute_exception(exc_info)
-        except BaseException as e:
-            logger.debug("%s", traceback.format_exc())
-            if isinstance(e, Exception):
-                logger.error("%s", e)
-
-
 def installer(cls):
     class Installer(cls, Installable):
         def __init__(self, **kwargs):
@@ -109,7 +98,7 @@ def installer(cls):
 
 
 def uninstaller(cls):
-    class Uninstaller(Continuous, cls, Installable):
+    class Uninstaller(cls, Installable):
         def __init__(self, **kwargs):
             super(Uninstaller, self).__init__(uninstalling=True,
                                               **kwargs)

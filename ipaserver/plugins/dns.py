@@ -86,6 +86,7 @@ from ipaserver.dns_data_management import (
     IPASystemRecords,
     IPADomainIsNotManagedByIPAError,
 )
+from ipaserver.masters import find_providing_servers, is_service_enabled
 
 if six.PY3:
     unicode = str
@@ -401,7 +402,7 @@ def _validate_ipnet(ugettext, ipnet):
 
 def _validate_bind_aci(ugettext, bind_acis):
     if not bind_acis:
-        return
+        return None
 
     bind_acis = bind_acis.split(';')
     if bind_acis[-1]:
@@ -422,10 +423,11 @@ def _validate_bind_aci(ugettext, bind_acis):
             return unicode(e)
         except UnboundLocalError:
             return _(u"invalid address format")
+    return None
 
 def _normalize_bind_aci(bind_acis):
     if not bind_acis:
-        return
+        return None
     bind_acis = bind_acis.split(';')
     normalized = []
     for bind_aci in bind_acis:
@@ -539,7 +541,14 @@ def get_reverse_zone(ipaddr):
     """
     ip = netaddr.IPAddress(str(ipaddr))
     revdns = DNSName(unicode(ip.reverse_dns))
-    revzone = DNSName(dns.resolver.zone_for_name(revdns))
+    try:
+        revzone = DNSName(dns.resolver.zone_for_name(revdns))
+    except dns.resolver.NoNameservers:
+        raise errors.NotFound(
+            reason=_(
+                'All nameservers failed to answer the query '
+                'for DNS reverse zone %(revdns)s') % dict(revdns=revdns)
+        )
 
     try:
         api.Command['dnszone_show'](revzone)
@@ -722,7 +731,7 @@ class DNSRecord(Str):
         vals = tuple(kw.get(part_name) for part_name in part_names)
 
         if all(val is None for val in vals):
-             return
+            return None
 
         if raise_on_none:
             for val_id,val in enumerate(vals):
@@ -782,17 +791,17 @@ class DNSRecord(Str):
 
     def _rule_validatedns(self, _, value):
         if not self.validatedns:
-            return
+            return None
 
         if value is None:
-            return
+            return None
 
         if not self.supported:
             return _('DNS RR type "%s" is not supported by bind-dyndb-ldap plugin') \
                      % self.rrtype
 
         if self.parts is None:
-            return
+            return None
 
         # validate record format
         values = self._get_part_values(value)
@@ -1275,6 +1284,8 @@ def _validate_naptr_flags(ugettext, flags):
     for flag in flags:
         if flag not in allowed_flags:
             return _('flags must be one of "S", "A", "U", or "P"')
+    return None
+
 
 class NAPTRRecord(DNSRecord):
     rrtype = 'NAPTR'
@@ -1363,6 +1374,7 @@ def _sig_time_validator(ugettext, value):
         time.strptime(value, time_format)
     except ValueError:
         return _('the value does not follow "YYYYMMDDHHMMSS" time format')
+    return None
 
 
 class SIGRecord(UnsupportedDNSRecord):
@@ -1453,7 +1465,7 @@ def _normalize_uri_target(uri_target):
     # RFC 7553 section 4.4: The Target MUST NOT be an empty URI ("").
     # minlength in param will detect this
     if not uri_target:
-        return
+        return None
     return u'"{0}"'.format(uri_target)
 
 
@@ -1582,19 +1594,7 @@ def dnssec_installed(ldap):
     :param ldap: ldap connection
     :return: True if DNSSEC was installed, otherwise False
     """
-    dn = DN(api.env.container_masters, api.env.basedn)
-
-    filter_attrs = {
-        u'cn': u'DNSSEC',
-        u'objectclass': u'ipaConfigObject',
-    }
-    only_masters_f = ldap.make_filter(filter_attrs, rules=ldap.MATCH_ALL)
-
-    try:
-        ldap.find_entries(filter=only_masters_f, base_dn=dn)
-    except errors.NotFound:
-        return False
-    return True
+    return is_service_enabled('DNSSEC', conn=ldap)
 
 
 def default_zone_update_policy(zone):
@@ -3020,6 +3020,8 @@ class dnsrecord(LDAPObject):
             cli_name='ttl',
             label=_('Time to live'),
             doc=_('Time to live'),
+            minvalue=0,
+            maxvalue=2147483647,  # see RFC 2181,
         ),
         StrEnum('dnsclass?',
             # Deprecated
@@ -3180,24 +3182,9 @@ class dnsrecord(LDAPObject):
         return cliname
 
     def get_dns_masters(self):
-        ldap = self.api.Backend.ldap2
-        base_dn = DN(('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'), self.api.env.basedn)
-        ldap_filter = '(&(objectClass=ipaConfigObject)(cn=DNS))'
-        dns_masters = []
-
-        try:
-            entries = ldap.find_entries(filter=ldap_filter, base_dn=base_dn)[0]
-
-            for entry in entries:
-                try:
-                    master = entry.dn[1]['cn']
-                    dns_masters.append(master)
-                except (IndexError, KeyError):
-                    pass
-        except errors.NotFound:
-            return []
-
-        return dns_masters
+        return find_providing_servers(
+            'DNS', self.api.Backend.ldap2, preferred_hosts=[api.env.host]
+        )
 
     def get_record_entry_attrs(self, entry_attrs):
         entry_attrs = entry_attrs.copy()
@@ -4066,19 +4053,8 @@ class dns_is_enabled(Command):
     NO_CLI = True
     has_output = output.standard_value
 
-    base_dn = DN(('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'), api.env.basedn)
-    filter = '(&(objectClass=ipaConfigObject)(cn=DNS))'
-
     def execute(self, *args, **options):
-        ldap = self.api.Backend.ldap2
-        dns_enabled = False
-
-        try:
-            ldap.find_entries(filter=self.filter, base_dn=self.base_dn)
-            dns_enabled = True
-        except errors.EmptyResult:
-            dns_enabled = False
-
+        dns_enabled = is_service_enabled('DNS', conn=self.api.Backend.ldap2)
         return dict(result=dns_enabled, value=pkey_to_value(None, options))
 
 

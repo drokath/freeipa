@@ -1,63 +1,78 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: freeipa 4.6.1.dev201712121258+gitb2d3b568c\n"
+"Project-Id-Version: freeipa 4.6.5.dev201907290557+git8334a8789\n"
 "Report-Msgid-Bugs-To: https://fedorahosted.org/freeipa/newticket\n"
-"POT-Creation-Date: 2017-12-12 14:00+0100\n"
+"POT-Creation-Date: 2019-07-29 08:58+0300\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"PO-Revision-Date: 2015-01-05 01:08-0500\n"
+"PO-Revision-Date: 2015-01-05 01:08+0000\n"
 "Last-Translator: Copied by Zanata <copied-by-zanata@zanata.org>\n"
 "Language-Team: Basque\n"
 "Language: eu\n"
-"X-Generator: Zanata 3.9.6\n"
+"X-Generator: Zanata 4.6.2\n"
 "Plural-Forms: nplurals=2; plural=(n != 1)\n"
 
 #, c-format
 msgid "Passwords do not match!"
 msgstr "Pasahitzak ez datoz bat!"
 
-msgid "LDAP password"
-msgstr "LDAP pasahitza"
+msgid "Command name"
+msgstr "Komandoaren izena"
 
-#, c-format
-msgid "Incorrect password.\n"
-msgstr "Pasahitz okerra.\n"
+msgid "an internal error has occurred"
+msgstr "barne-errore bat gertatu da"
 
-#, c-format
-msgid "ipa-getkeytab not found\n"
-msgstr "ez da ipa-getkeytab aurkitu\n"
+#, python-format
+msgid "Invalid JSON-RPC request: %(error)s"
+msgstr "Baliogabeko JSON-RPC eskaera: %(error)s"
 
-msgid "hostname"
-msgstr "ostalari-izena"
+#, python-format
+msgid "Kerberos error: %(major)s/%(minor)s"
+msgstr "Kerberos errorea: %(major)s/%(minor)s"
 
-msgid "IPA Server to use"
-msgstr "Erabili beharreko IPA zerbitzaria"
+msgid "Passwords do not match"
+msgstr "Pasahitzak ez datoz bat"
 
-msgid "filename"
-msgstr "fitxategi-izena"
+#, python-format
+msgid "%(reason)s"
+msgstr "%(reason)s"
 
-msgid "password"
-msgstr "pasahitza"
+msgid "This entry already exists"
+msgstr "Sarrera hau dagoeneko existitzen da"
+
+#, python-format
+msgid "%(desc)s: %(info)s"
+msgstr "%(desc)s: %(info)s"
+
+#, python-format
+msgid "%(info)s"
+msgstr "%(info)s"
+
+msgid "invalid IP address format"
+msgstr "IP helbide formatu baliogabea"
 
 msgid "Description"
 msgstr "Deskribapena"
 
-msgid "UID"
-msgstr "UID"
+msgid "NIS domain name"
+msgstr "NIS domeinu-izena"
 
-msgid "Rename"
-msgstr "Berrizendatu"
+msgid "PKINIT"
+msgstr "PKINIT"
 
-msgid "Group"
-msgstr "Taldea"
+msgid "HBAC rule"
+msgstr "HBAC araua"
 
-msgid "History size"
-msgstr "Historiaren tamaina"
+msgid "HBAC rules"
+msgstr "HBAC arauak"
 
-msgid "User"
-msgstr "Erabiltzailea"
+msgid "HBAC Rules"
+msgstr "HBAC arauak"
+
+msgid "Rule type"
+msgstr "Arau-mota"
 
 msgid "Enabled"
 msgstr "Gaituta"
@@ -68,32 +83,17 @@ msgstr "Erabiltzaileak"
 msgid "User Groups"
 msgstr "Erabiltzaile-taldeak"
 
-msgid "External User"
-msgstr "Kanpoko erabiltzailea"
-
 msgid "Hosts"
 msgstr "Ostalariak"
 
 msgid "Host Groups"
 msgstr "Ostalari-taldeak"
 
-msgid "External host"
-msgstr "Kanpoko ostalaria"
+msgid "Services"
+msgstr "Zerbitzuak"
 
-msgid "RunAs External User"
-msgstr "Exekutatu kanpoko erabiltzaile bezala"
-
-msgid "RunAs External Group"
-msgstr "Exekutatu kanpoko talde bezala"
-
-msgid "Sudo Option"
-msgstr "Sudo aukera"
-
-msgid "NIS domain name"
-msgstr "NIS domeinu-izena"
-
-msgid "group"
-msgstr "taldea"
+msgid "Service Groups"
+msgstr "Zerbitzu-taldeak"
 
 msgid "Permissions"
 msgstr "Baimenak"
@@ -104,206 +104,17 @@ msgstr "Atributuak"
 msgid "User group"
 msgstr "Erabiltzaile-taldea"
 
+msgid "ACI"
+msgstr "ACI"
+
+msgid "IPA Server"
+msgstr "IPA zerbitzaria"
+
 msgid "Certificate"
 msgstr "Ziurtagiria"
 
-msgid "Force"
-msgstr "Behartu"
-
-msgid "Rule type"
-msgstr "Arau-mota"
-
-msgid "Services"
-msgstr "Zerbitzuak"
-
-msgid "Service Groups"
-msgstr "Zerbitzu-taldeak"
-
-msgid "Service name"
-msgstr "Zerbitzuaren izena"
-
-msgid "HBAC service"
-msgstr "HBAC zerbitzua"
-
-msgid "HBAC service description"
-msgstr "HBAC zerbitzuaren deskribapena"
-
-msgid "First name"
-msgstr "Izena"
-
-msgid "Last name"
-msgstr "Abizena"
-
-msgid "Full name"
-msgstr "Izen osoa"
-
-msgid "Display name"
-msgstr "Bistaratu izena"
-
-msgid "Email address"
-msgstr "E-posta helbidea"
-
-msgid "Password"
-msgstr "Pasahitza"
-
-msgid "Random password"
-msgstr "Ausazko pasahitza"
-
-msgid "Street address"
-msgstr "Kalea"
-
-msgid "Telephone Number"
-msgstr "Telefono-zenbakia"
-
-msgid "Mobile Telephone Number"
-msgstr "Mugikor-zenbakia"
-
-msgid "Pager Number"
-msgstr "Bilagailu-zenbakia"
-
-msgid "Fax Number"
-msgstr "Fax-zenbakia"
-
-msgid "Manager"
-msgstr "Kudeatzailea"
-
-msgid "Class"
-msgstr "Klasea"
-
-msgid "HBAC rule"
-msgstr "HBAC araua"
-
-msgid "Type"
-msgstr "Mota"
-
-msgid "Subtree"
-msgstr "Azpi-zuhaitza"
-
-msgid "Target group"
-msgstr "Helburuko taldea"
-
-msgid "Service group name"
-msgstr "Zerbitzu-taldearen izena"
-
-msgid "HBAC service group description"
-msgstr "HBAC zerbitzu-taldearen deskribapena"
-
-msgid "ACI name"
-msgstr "ACI izena"
-
-msgid "Permission"
-msgstr "Baimena"
-
-msgid "Filter"
-msgstr "Iragazkia"
-
-msgid "ACI prefix"
-msgstr "ACI aurrizkia"
-
-msgid "New ACI name"
-msgstr "ACI izen berria"
-
-msgid "Host name"
-msgstr "Ostalari-izena"
-
-msgid "A description of this host"
-msgstr "Ostalari honen deskribapena"
-
-msgid "Operating system"
-msgstr "Sistema eragilea"
-
-msgid "Host operating system and version (e.g. \"Fedora 9\")"
-msgstr "Ostalariaren sistema eragilea eta bertsioa (adibidez, \"Fedora 9\")"
-
-msgid "User password"
-msgstr "Erabiltzailearen pasahitza"
-
-msgid "Host-group"
-msgstr "Ostalari-taldea"
-
-msgid "Name of host-group"
-msgstr "Ostalari-taldearen izena"
-
-msgid "A description of this host-group"
-msgstr "Ostalari-talde honen deskribapena"
-
-msgid "Maximum username length"
-msgstr "Erabiltzaile-izenaren gehienezko luzera"
-
-msgid "Home directory base"
-msgstr "Direktorio nagusiaren oinarria"
-
-msgid "Default location of home directories"
-msgstr "Karpeta nagusien kokaleku lehenetsia"
-
-msgid "Default shell"
-msgstr "Shell lehenetsia"
-
-msgid "Default shell for new users"
-msgstr "Erabiltzaile berrientzako shell lehenetsia"
-
-msgid "Default users group"
-msgstr "Erabiltzaile-talde lehenetsia"
-
-msgid "Default group for new users"
-msgstr "Erabiltzaile berrientzako talde lehenetsia"
-
-msgid "Default e-mail domain"
-msgstr "E-posta domeinu lehenetsia"
-
-msgid "Sudo Command Group"
-msgstr "Sudo komando-taldea"
-
-msgid "description"
-msgstr "deskribapena"
-
 msgid "Subject"
 msgstr "Gaia"
-
-msgid "Reason"
-msgstr "Arrazoia"
-
-msgid "Serial number"
-msgstr "Serie-zenbakia"
-
-msgid "Output filename"
-msgstr "Irteerako fitxategi-izena"
-
-msgid "Create a new group."
-msgstr "Sortu talde berri bat."
-
-msgid "Delete group."
-msgstr "Ezabatu taldea."
-
-msgid "Search for groups."
-msgstr "Bilatu taldeak."
-
-msgid "Modify a group."
-msgstr "Aldatu talde bat."
-
-msgid "Hostname"
-msgstr "Ostalari-izena"
-
-msgid "Administrator e-mail address"
-msgstr "Administratzailearen e-posta helbidea"
-
-msgid "New Password"
-msgstr "Pasahitz berria"
-
-msgid "Username"
-msgstr "Erabiltzaile-izena"
-
-msgid "Data"
-msgstr "Datuak"
-
-msgid "Error"
-msgstr "Errorea"
-
-msgid "PKINIT"
-msgstr "PKINIT"
-
-msgid "ACI"
-msgstr "ACI"
 
 msgid "Serial Number"
 msgstr "Serie-zenbakia"
@@ -315,18 +126,48 @@ msgstr "Hatz-marka (SHA1)"
 msgid "Added service \"%(value)s\""
 msgstr "\"%(value)s\" zerbitzua gehituta"
 
+msgid "Force"
+msgstr "Behartu"
+
 #, python-format
 msgid "Deleted service \"%(value)s\""
 msgstr "\"%(value)s\" zerbitzua ezabatuta"
 
-msgid "HBAC rules"
-msgstr "HBAC arauak"
+msgid "description"
+msgstr "deskribapena"
 
-msgid "HBAC Rules"
-msgstr "HBAC arauak"
+msgid "Group"
+msgstr "Taldea"
 
-msgid "HBAC Services"
-msgstr "HBAC zerbitzuak"
+msgid "History size"
+msgstr "Historiaren tamaina"
+
+msgid "User"
+msgstr "Erabiltzailea"
+
+msgid "Full name"
+msgstr "Izen osoa"
+
+msgid "Type"
+msgstr "Mota"
+
+msgid "group"
+msgstr "taldea"
+
+#, python-format
+msgid "Added user \"%(value)s\""
+msgstr "\"%(value)s\" erabiltzailea gehituta"
+
+#, python-format
+msgid "Deleted user \"%(value)s\""
+msgstr "\"%(value)s\" erabiltzailea ezabatuta"
+
+#, python-format
+msgid "Modified user \"%(value)s\""
+msgstr "\"%(value)s\" erabiltzailea aldatuta"
+
+msgid "Password"
+msgstr "Pasahitza"
 
 msgid "Add and Add Another"
 msgstr "Gehitu eta gehitu beste bat"
@@ -346,6 +187,9 @@ msgstr "Utzi"
 msgid "Close"
 msgstr "Itxi"
 
+msgid "Filter"
+msgstr "Iragazkia"
+
 msgid "OK"
 msgstr "Ados"
 
@@ -358,11 +202,17 @@ msgstr "Ikusi"
 msgid "General"
 msgstr "Orokorra"
 
+msgid "Error"
+msgstr "Errorea"
+
 msgid "Settings"
 msgstr "Ezarpenak"
 
 msgid "Search"
 msgstr "Bilatu"
+
+msgid "Username"
+msgstr "Erabiltzaile-izena"
 
 msgid "Attribute"
 msgstr "Atributua"
@@ -381,6 +231,9 @@ msgstr "SHA1 hatz-marka"
 
 msgid "Status"
 msgstr "Egoera"
+
+msgid "Data"
+msgstr "Datuak"
 
 msgid "Group Settings"
 msgstr "Taldearen ezarpenak"
@@ -418,6 +271,9 @@ msgstr "Kontuaren ezarpenak"
 msgid "Contact Settings"
 msgstr "Kontaktuaren ezarpenak"
 
+msgid "New Password"
+msgstr "Pasahitz berria"
+
 msgid "Passwords must match"
 msgstr "Pasahitzek bat etorri behar dute"
 
@@ -430,11 +286,68 @@ msgstr "Ziur zaude hautatutako sarrerak ezabatu nahi dituzula?"
 msgid "DNS"
 msgstr "DNS"
 
-msgid "IPA Server"
-msgstr "IPA zerbitzaria"
-
 msgid "Sudo"
 msgstr "Sudo"
+
+msgid "invalid IP network format"
+msgstr "IP sare formatu baliogabea"
+
+msgid "Hostname"
+msgstr "Ostalari-izena"
+
+msgid "Administrator e-mail address"
+msgstr "Administratzailearen e-posta helbidea"
+
+msgid "HBAC service"
+msgstr "HBAC zerbitzua"
+
+msgid "HBAC Services"
+msgstr "HBAC zerbitzuak"
+
+msgid "Service name"
+msgstr "Zerbitzuaren izena"
+
+msgid "HBAC service description"
+msgstr "HBAC zerbitzuaren deskribapena"
+
+msgid "groups"
+msgstr "taldeak"
+
+msgid "User Group"
+msgstr "Erabiltzaile-taldea"
+
+msgid "Create a new group."
+msgstr "Sortu talde berri bat."
+
+msgid "Delete group."
+msgstr "Ezabatu taldea."
+
+msgid "Modify a group."
+msgstr "Aldatu talde bat."
+
+msgid "Search for groups."
+msgstr "Bilatu taldeak."
+
+msgid "Service group name"
+msgstr "Zerbitzu-taldearen izena"
+
+msgid "HBAC service group description"
+msgstr "HBAC zerbitzu-taldearen deskribapena"
+
+msgid "Invalid LDAP URI."
+msgstr "LDAP URI baliogabea."
+
+msgid "Manager"
+msgstr "Kudeatzailea"
+
+msgid "Permission"
+msgstr "Baimena"
+
+msgid "Subtree"
+msgstr "Azpi-zuhaitza"
+
+msgid "Target group"
+msgstr "Helburuko taldea"
 
 msgid "A list of ACI values"
 msgstr "ACI balioen zerrenda bat"
@@ -443,8 +356,20 @@ msgstr "ACI balioen zerrenda bat"
 msgid "Syntax Error: %(error)s"
 msgstr "Sintaxi-errorea: %(error)s"
 
+msgid "ACI prefix"
+msgstr "ACI aurrizkia"
+
 msgid "ACIs"
 msgstr "ACIak"
+
+msgid "ACI name"
+msgstr "ACI izena"
+
+msgid "New ACI name"
+msgstr "ACI izen berria"
+
+msgid "External host"
+msgstr "Kanpoko ostalaria"
 
 msgid "entry"
 msgstr "sarrera"
@@ -452,9 +377,82 @@ msgstr "sarrera"
 msgid "entries"
 msgstr "sarrerak"
 
+msgid "Rename"
+msgstr "Berrizendatu"
+
 #, python-format
 msgid "Rename the %(ldap_obj_name)s object"
 msgstr "%(ldap_obj_name)s objektua berrizendatu"
+
+msgid "Serial number"
+msgstr "Serie-zenbakia"
+
+msgid "Output filename"
+msgstr "Irteerako fitxategi-izena"
+
+msgid "First name"
+msgstr "Izena"
+
+msgid "Last name"
+msgstr "Abizena"
+
+msgid "Display name"
+msgstr "Bistaratu izena"
+
+msgid "Email address"
+msgstr "E-posta helbidea"
+
+msgid "Random password"
+msgstr "Ausazko pasahitza"
+
+msgid "UID"
+msgstr "UID"
+
+msgid "Street address"
+msgstr "Kalea"
+
+msgid "Telephone Number"
+msgstr "Telefono-zenbakia"
+
+msgid "Mobile Telephone Number"
+msgstr "Mugikor-zenbakia"
+
+msgid "Pager Number"
+msgstr "Bilagailu-zenbakia"
+
+msgid "Fax Number"
+msgstr "Fax-zenbakia"
+
+msgid "Class"
+msgstr "Klasea"
+
+msgid "Host-group"
+msgstr "Ostalari-taldea"
+
+msgid "Name of host-group"
+msgstr "Ostalari-taldearen izena"
+
+msgid "A description of this host-group"
+msgstr "Ostalari-talde honen deskribapena"
+
+#, python-format
+msgid "Added hostgroup \"%(value)s\""
+msgstr "\"%(value)s\" ostalari-taldea gehituta"
+
+msgid "Host name"
+msgstr "Ostalari-izena"
+
+msgid "A description of this host"
+msgstr "Ostalari honen deskribapena"
+
+msgid "Operating system"
+msgstr "Sistema eragilea"
+
+msgid "Host operating system and version (e.g. \"Fedora 9\")"
+msgstr "Ostalariaren sistema eragilea eta bertsioa (adibidez, \"Fedora 9\")"
+
+msgid "User password"
+msgstr "Erabiltzailearen pasahitza"
 
 #, python-format
 msgid "Added host \"%(value)s\""
@@ -468,74 +466,72 @@ msgstr "\"%(value)s\" ostalaria ezabatuta"
 msgid "Modified host \"%(value)s\""
 msgstr "\"%(value)s\" ostalaria aldatuta"
 
-#, python-format
-msgid "Added hostgroup \"%(value)s\""
-msgstr "\"%(value)s\" ostalari-taldea gehituta"
+msgid "External User"
+msgstr "Kanpoko erabiltzailea"
+
+msgid "RunAs External User"
+msgstr "Exekutatu kanpoko erabiltzaile bezala"
+
+msgid "RunAs External Group"
+msgstr "Exekutatu kanpoko talde bezala"
+
+msgid "Sudo Option"
+msgstr "Sudo aukera"
 
 msgid "Configuration"
 msgstr "Konfigurazioa"
 
+msgid "Maximum username length"
+msgstr "Erabiltzaile-izenaren gehienezko luzera"
+
+msgid "Home directory base"
+msgstr "Direktorio nagusiaren oinarria"
+
+msgid "Default location of home directories"
+msgstr "Karpeta nagusien kokaleku lehenetsia"
+
+msgid "Default shell"
+msgstr "Shell lehenetsia"
+
+msgid "Default shell for new users"
+msgstr "Erabiltzaile berrientzako shell lehenetsia"
+
+msgid "Default users group"
+msgstr "Erabiltzaile-talde lehenetsia"
+
+msgid "Default group for new users"
+msgstr "Erabiltzaile berrientzako talde lehenetsia"
+
+msgid "Default e-mail domain"
+msgstr "E-posta domeinu lehenetsia"
+
 msgid "The group doesn't exist"
 msgstr "Taldea ez da existitzen"
-
-msgid "Invalid LDAP URI."
-msgstr "LDAP URI baliogabea."
-
-#, python-format
-msgid "Added user \"%(value)s\""
-msgstr "\"%(value)s\" erabiltzailea gehituta"
-
-#, python-format
-msgid "Deleted user \"%(value)s\""
-msgstr "\"%(value)s\" erabiltzailea ezabatuta"
-
-#, python-format
-msgid "Modified user \"%(value)s\""
-msgstr "\"%(value)s\" erabiltzailea aldatuta"
-
-msgid "groups"
-msgstr "taldeak"
-
-msgid "User Group"
-msgstr "Erabiltzaile-taldea"
 
 msgid "Sudo Commands"
 msgstr "Sudo komandoak"
 
-msgid "invalid IP network format"
-msgstr "IP sare formatu baliogabea"
+msgid "Sudo Command Group"
+msgstr "Sudo komando-taldea"
 
-msgid "Command name"
-msgstr "Komandoaren izena"
+#, c-format
+msgid "ipa-getkeytab not found\n"
+msgstr "ez da ipa-getkeytab aurkitu\n"
 
-msgid "invalid IP address format"
-msgstr "IP helbide formatu baliogabea"
+msgid "hostname"
+msgstr "ostalari-izena"
 
-msgid "an internal error has occurred"
-msgstr "barne-errore bat gertatu da"
+msgid "IPA Server to use"
+msgstr "Erabili beharreko IPA zerbitzaria"
 
-#, python-format
-msgid "Invalid JSON-RPC request: %(error)s"
-msgstr "Baliogabeko JSON-RPC eskaera: %(error)s"
+msgid "filename"
+msgstr "fitxategi-izena"
 
-#, python-format
-msgid "Kerberos error: %(major)s/%(minor)s"
-msgstr "Kerberos errorea: %(major)s/%(minor)s"
+msgid "password"
+msgstr "pasahitza"
 
-msgid "Passwords do not match"
-msgstr "Pasahitzak ez datoz bat"
+msgid "LDAP password"
+msgstr "LDAP pasahitza"
 
-#, python-format
-msgid "%(reason)s"
-msgstr "%(reason)s"
-
-msgid "This entry already exists"
-msgstr "Sarrera hau dagoeneko existitzen da"
-
-#, python-format
-msgid "%(desc)s: %(info)s"
-msgstr "%(desc)s: %(info)s"
-
-#, python-format
-msgid "%(info)s"
-msgstr "%(info)s"
+msgid "Reason"
+msgstr "Arrazoia"

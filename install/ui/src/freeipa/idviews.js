@@ -317,6 +317,10 @@ return {
                 $type: 'cert_textarea',
                 name: 'usercertificate'
             },
+            {
+                $type: 'sshkey',
+                name: 'ipasshpubkey'
+            },
             'loginshell',
             'homedirectory',
             {
@@ -448,6 +452,23 @@ idviews.id_override_user_details_facet = function(spec) {
         batch.add_command(certs);
 
         return batch;
+    };
+
+    that.update_on_success = function(data, text_status, xhr) {
+        that.on_update.notify();
+        that.nofify_update_success();
+        that.refresh();
+    };
+
+    that.load = function(data) {
+        var is_trust_view = that.get_pkeys()[0] === idviews.DEFAULT_TRUST_VIEW;
+        var widget = that.fields.get_field('ipaanchoruuid').widget;
+
+        // Disable link for AD users
+        widget.no_check = is_trust_view;
+        widget.is_link = !is_trust_view;
+
+        that.details_facet_load(data);
     };
 
     return that;

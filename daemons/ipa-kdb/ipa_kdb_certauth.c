@@ -39,7 +39,6 @@
 
 #include <errno.h>
 //#include <krb5/certauth_plugin.h>
-#include <syslog.h>
 #include <sss_certmap.h>
 
 #include "ipa_krb5.h"
@@ -72,10 +71,13 @@ struct krb5_certauth_moddata_st {
     time_t valid_until;
 };
 
-void ipa_certmap_debug(void *private,
-                       const char *file, long line,
-                       const char *function,
-                       const char *format, ...)
+krb5_error_code certauth_ipakdb_initvt(krb5_context context,
+                                       int maj_ver, int min_ver,
+                                       krb5_plugin_vtable vtable);
+
+static void ipa_certmap_debug(void *private, const char *file, long line,
+                              const char *function,
+                              const char *format, ...)
 {
     va_list ap;
     char str[255] = { 0 };
@@ -131,7 +133,7 @@ static krb5_error_code ipa_get_init_data(krb5_context kcontext,
     krb5_klog_syslog(LOG_INFO, "Initializing IPA certauth plugin.");
 
     ipactx = ipadb_get_context(kcontext);
-    if (ipactx == NULL) {
+    if (ipactx == NULL || ipactx->magic != IPA_CONTEXT_MAGIC) {
         return KRB5_KDB_DBNOTINITED;
     }
 
@@ -356,12 +358,12 @@ static krb5_error_code ipa_certauth_authorize(krb5_context context,
      * so there is nothing more to add here. */
     auth_inds = calloc(2, sizeof(char *));
     if (auth_inds != NULL) {
-	ret = asprintf(&auth_inds[0], "pkinit");
-	if (ret != -1) {
+        ret = asprintf(&auth_inds[0], "pkinit");
+        if (ret != -1) {
             auth_inds[1] = NULL;
             *authinds_out = auth_inds;
-	} else {
-	    free(auth_inds);
+        } else {
+            free(auth_inds);
         }
     }
 
@@ -406,12 +408,12 @@ static void ipa_certauth_free_indicator(krb5_context context,
     size_t i = 0;
 
     if ((authinds == NULL) || (moddata == NULL)) {
-	return;
+        return;
     }
 
     for(i=0; authinds[i]; i++) {
-	free(authinds[i]);
-	authinds[i] = NULL;
+        free(authinds[i]);
+        authinds[i] = NULL;
     }
 
     free(authinds);

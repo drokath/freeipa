@@ -658,10 +658,20 @@ class TestDN(unittest.TestCase):
         self.base_container_dn = DN((self.attr1, self.value1),
                                     self.container_dn, self.base_dn)
 
-        self.x500name = x509.Name([
-            x509.NameAttribute(
-                x509.NameOID.ORGANIZATIONAL_UNIT_NAME, self.value2),
-            x509.NameAttribute(x509.NameOID.COMMON_NAME, self.value1),
+        ou = x509.NameAttribute(
+            x509.NameOID.ORGANIZATIONAL_UNIT_NAME, self.value2)
+        cn = x509.NameAttribute(x509.NameOID.COMMON_NAME, self.value1)
+        c = x509.NameAttribute(x509.NameOID.COUNTRY_NAME, u'AU')
+        st = x509.NameAttribute(
+            x509.NameOID.STATE_OR_PROVINCE_NAME, u'Queensland')
+        self.x500name = x509.Name([ou, cn])
+        self.x500nameMultiRDN = x509.Name([
+            x509.RelativeDistinguishedName([c, st]),
+            x509.RelativeDistinguishedName([cn]),
+        ])
+        self.x500nameMultiRDN2 = x509.Name([
+            x509.RelativeDistinguishedName([st, c]),
+            x509.RelativeDistinguishedName([cn]),
         ])
 
     def assertExpectedClass(self, klass, obj, component):
@@ -814,6 +824,15 @@ class TestDN(unittest.TestCase):
         self.assertEqual(dn1[0], self.rdn1)
         self.assertEqual(dn1[1], self.rdn2)
 
+        # Create from 'Name' with multi-valued RDN
+        dn1 = DN(self.x500nameMultiRDN)
+        self.assertEqual(len(dn1), 2)
+        self.assertEqual(len(dn1[1]), 2)
+        self.assertIn(AVA('c', 'au'), dn1[1])
+        self.assertIn(AVA('st', 'queensland'), dn1[1])
+        self.assertEqual(len(dn1[0]), 1)
+        self.assertIn(self.ava1, dn1[0])
+
         # Create with RDN, and 2 DN's (e.g. attr + container + base)
         dn1 = DN((self.attr1, self.value1), self.container_dn, self.base_dn)
         self.assertEqual(len(dn1), 5)
@@ -913,6 +932,7 @@ class TestDN(unittest.TestCase):
 
         # Test "in" membership
         self.assertTrue(self.container_rdn1 in container_dn)
+        # pylint: disable=comparison-with-itself
         self.assertTrue(container_dn in container_dn)
         self.assertFalse(self.base_rdn1 in container_dn)
 
@@ -926,6 +946,23 @@ class TestDN(unittest.TestCase):
                         base_container_dn)
 
         self.assertFalse(self.container_rdn1 in self.base_dn)
+
+    def test_eq_multi_rdn(self):
+        dn1 = DN(self.ava1, 'ST=Queensland+C=AU')
+        dn2 = DN(self.ava1, 'C=AU+ST=Queensland')
+        self.assertEqual(dn1, dn2)
+
+        # ensure AVAs get sorted when constructing from x509.Name
+        dn3 = DN(self.x500nameMultiRDN)
+        dn4 = DN(self.x500nameMultiRDN2)
+        self.assertEqual(dn3, dn4)
+
+        # ensure AVAs get sorted in the same way regardless of what
+        # the DN was constructed from
+        self.assertEqual(dn1, dn3)
+        self.assertEqual(dn1, dn4)
+        self.assertEqual(dn2, dn3)
+        self.assertEqual(dn2, dn4)
 
     def test_indexing(self):
         dn1 = DN(self.dn1)

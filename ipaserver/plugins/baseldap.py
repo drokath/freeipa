@@ -319,6 +319,7 @@ def validate_externalhost(ugettext, hostname):
         validate_hostname(hostname, check_fqdn=False, allow_underscore=True)
     except ValueError as e:
         return unicode(e)
+    return None
 
 
 external_host_param = Str('externalhost*', validate_externalhost,
@@ -496,7 +497,7 @@ def host_is_master(ldap, fqdn):
 
     Raises an exception if a master, otherwise returns nothing.
     """
-    master_dn = DN(('cn', fqdn), ('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'), api.env.basedn)
+    master_dn = DN(('cn', fqdn), api.env.container_masters, api.env.basedn)
     try:
         ldap.get_entry(master_dn, ['objectclass'])
         raise errors.ValidationError(name='hostname', error=_('An IPA master host cannot be deleted or disabled'))
@@ -1072,7 +1073,9 @@ last, after all sets and adds."""),
                 entry_attrs[attr] = value
             else:
                 # unknown attribute: remove duplicite and invalid values
-                entry_attrs[attr] = list(set([val for val in entry_attrs[attr] if val]))
+                entry_attrs[attr] = list(
+                    {val for val in entry_attrs[attr] if val}
+                )
                 if not entry_attrs[attr]:
                     entry_attrs[attr] = None
                 elif isinstance(entry_attrs[attr], (tuple, list)) and len(entry_attrs[attr]) == 1:
@@ -2342,7 +2345,9 @@ class BaseLDAPModAttribute(LDAPQuery):
         return arg.clone(required=True, attribute=attribute, alwaysask=True)
 
     def _update_attrs(self, update, entry_attrs):
-        raise NotImplementedError("%s.update_attrs()", self.__class__.__name__)
+        raise NotImplementedError(
+            "%s.update_attrs()" % self.__class__.__name__
+        )
 
     def execute(self, *keys, **options):
         ldap = self.obj.backend
@@ -2425,9 +2430,7 @@ class BaseLDAPAddAttribute(BaseLDAPModAttribute):
             value_to_add = set(value)
 
             if not old_value.isdisjoint(value_to_add):
-                raise errors.ExecutionError(
-                    message=_('\'%(attr)s\' already contains one or more '
-                              'values') % dict(attr=name))
+                raise errors.AlreadyContainsValueError(attr=name)
 
             update[name] = list(old_value | value_to_add)
 

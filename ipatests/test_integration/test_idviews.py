@@ -2,12 +2,14 @@
 # Copyright (C) 2016  FreeIPA Contributors see COPYING for license
 #
 
+from __future__ import absolute_import
+
 import os
 import re
 import string
-from ipatests.pytest_plugins.integration import tasks
+from ipatests.pytest_ipa.integration import tasks
 from ipatests.test_integration.base import IntegrationTest
-from ipatests.pytest_plugins.integration.env_config import get_global_config
+from ipatests.pytest_ipa.integration.env_config import get_global_config
 from ipaplatform.paths import paths
 config = get_global_config()
 
@@ -42,6 +44,7 @@ class TestCertsInIDOverrides(IntegrationTest):
         # sssd_domain.set_option knows nothing about 'services' parameter of
         # the sssd config file. Therefore I am using sed approach
         master.run_command(
+            r"grep -qP 'services\b.+\bifp\b' %s ||" % paths.SSSD_CONF +
             "sed -i '/^services/ s/$/, ifp/' %s" % paths.SSSD_CONF)
         master.run_command(
             "sed -i 's/= 7/= 0xFFF0/' %s" % paths.SSSD_CONF, raiseonerr=False)
@@ -51,6 +54,7 @@ class TestCertsInIDOverrides(IntegrationTest):
         # AD-related stuff
         tasks.install_adtrust(master)
         tasks.sync_time(master, cls.ad)
+        tasks.configure_dns_for_trust(master, cls.ad)
         tasks.establish_trust_with_ad(cls.master, cls.ad_domain,
                                       extra_args=['--range-type',
                                                   'ipa-ad-trust'])
@@ -81,10 +85,16 @@ class TestCertsInIDOverrides(IntegrationTest):
                            cls.reqdir, stdin=stdin_text)
 
         # Export the previously generated cert
-        tasks.run_certutil(master, ['-L', '-n', cls.adcert1, '-a', '>',
-                                    cls.adcert1_file], cls.reqdir)
-        tasks.run_certutil(master, ['-L', '-n', cls.adcert2, '-a', '>',
-                                    cls.adcert2_file], cls.reqdir)
+        res = tasks.run_certutil(master, ['-L', '-n', cls.adcert1, '-a'],
+                                 cls.reqdir)
+        master.put_file_contents(
+            os.path.join(master.config.test_dir, cls.adcert1_file),
+            res.stdout_text)
+        res = tasks.run_certutil(master, ['-L', '-n', cls.adcert2, '-a'],
+                                 cls.reqdir)
+        master.put_file_contents(
+            os.path.join(master.config.test_dir, cls.adcert2_file),
+            res.stdout_text)
         cls.cert1_base64 = cls.master.run_command(
             "openssl x509 -outform der -in %s | base64 -w 0" % cls.adcert1_file
             ).stdout_text
@@ -163,6 +173,7 @@ class TestRulesWithServicePrincipals(IntegrationTest):
 
     topology = 'star'
     num_replicas = 0
+    num_clients = 0
     service_certprofile = 'caIPAserviceCert'
     caacl = 'test_caacl'
     keytab = "replica.keytab"
@@ -236,3 +247,133 @@ EOF
                                          raiseonerr=False)
         assert(result.returncode == 0), (
             'Failed to add a cert to custom certprofile')
+
+
+class TestIDViews(IntegrationTest):
+    topology = 'star'
+    num_replicas = 0
+    num_clients = 1
+
+    user1 = 'testuser1'
+    user1_uid = 10001
+    user1_gid = 10001
+    user1_uid_override = 5001
+    user1_gid_override = 6001
+
+    user2 = 'testuser2'
+    user2_uid = 10002
+    user2_gid = 10002
+
+    group1 = 'testgroup1'
+    group1_gid = 11001
+    group1_gid_override = 7001
+
+    idview = 'testview'
+
+    @classmethod
+    def install(cls, mh):
+        super(TestIDViews, cls).install(mh)
+        master = cls.master
+        client = cls.clients[0]
+        tasks.kinit_admin(master)
+
+        tasks.user_add(
+            master, cls.user1, first='Test1',
+            extra_args=[
+                '--uid', str(cls.user1_uid),
+                '--gidnumber', str(cls.user1_gid),
+            ]
+        )
+        tasks.user_add(
+            master, cls.user2, first='Test2',
+            extra_args=[
+                '--uid', str(cls.user2_uid),
+                '--gidnumber', str(cls.user2_gid),
+            ]
+        )
+        tasks.group_add(
+            master, cls.group1, extra_args=['--gid', str(cls.group1_gid)]
+        )
+
+        master.run_command(['ipa', 'idview-add', cls.idview])
+
+        # add overrides for user1 and its default user group
+        master.run_command([
+            'ipa', 'idoverrideuser-add', cls.idview, cls.user1,
+            '--uid', str(cls.user1_uid_override),
+            '--gid', str(cls.user1_gid_override),
+            '--homedir', '/special-home/{}'.format(cls.user1),
+            '--shell', '/bin/special'
+        ])
+        master.run_command([
+            'ipa', 'idoverridegroup-add', cls.idview, cls.group1,
+            '--gid', str(cls.group1_gid_override),
+        ])
+
+        # ID view overrides don't work on IPA masters
+        master.run_command([
+            'ipa', 'idview-apply', cls.idview,
+            '--hosts', client.hostname
+        ])
+        # finally restart SSSD to materialize idviews
+        client.run_command(['systemctl', 'restart', 'sssd.service'])
+
+    def test_useroverride(self):
+        result = self.clients[0].run_command(['id', self.user1])
+        assert 'uid={}'.format(self.user1_uid_override) in result.stdout_text
+        assert 'gid={}'.format(self.user1_gid_override) in result.stdout_text
+
+        result = self.clients[0].run_command(
+            ['getent', 'passwd', str(self.user1_uid_override)]
+        )
+        expected = '{}:*:{}:{}'.format(
+            self.user1, self.user1_uid_override, self.user1_gid_override
+        )
+        assert expected in result.stdout_text
+
+        result = self.master.run_command(['id', self.user1])
+        assert 'uid={}'.format(self.user1_uid) in result.stdout_text
+        assert 'gid={}'.format(self.user1_gid) in result.stdout_text
+
+    def test_useroverride_original_uid(self):
+        # It's still possible to request the user with its original UID. In
+        # this case the getent command returns the user with override uid.
+        result = self.clients[0].run_command(
+            ['getent', 'passwd', str(self.user1_uid)]
+        )
+        expected = '{}:*:{}:{}'.format(
+            self.user1, self.user1_uid_override, self.user1_gid_override
+        )
+        assert expected in result.stdout_text
+
+    def test_anchor_username(self):
+        result = self.master.run_command([
+            'ipa', 'idoverrideuser-find', self.idview, '--anchor', self.user1
+        ])
+        expected = "Anchor to override: {}".format(self.user1)
+        assert expected in result.stdout_text
+
+    def test_groupoverride(self):
+        result = self.clients[0].run_command(['getent', 'group', self.group1])
+        assert ':{}:'.format(self.group1_gid_override) in result.stdout_text
+
+        result = self.master.run_command(['getent', 'group', self.group1])
+        assert ':{}:'.format(self.group1_gid) in result.stdout_text
+
+    def test_groupoverride_system_objects(self):
+        # group override for user group should fail
+        result = self.master.run_command(
+            ['ipa', 'idoverridegroup-add', self.idview, self.user1,
+             '--gid', str(self.user1_gid_override)],
+            raiseonerr=False
+        )
+        assert result.returncode == 1
+        assert "cannot be overridden" in result.stderr_text
+
+    def test_anchor_groupname(self):
+        result = self.master.run_command([
+            'ipa', 'idoverridegroup-find', self.idview,
+            '--anchor', self.group1
+        ])
+        expected = "Anchor to override: {}".format(self.group1)
+        assert expected in result.stdout_text

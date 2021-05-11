@@ -141,7 +141,7 @@ krb5_error_code ipadb_get_pwd_policy(krb5_context kcontext, char *name,
     char *esc_name = NULL;
     char *src_filter = NULL;
     krb5_error_code kerr;
-    struct ipadb_multires *res;
+    struct ipadb_multires *res = NULL;
     LDAPMessage *lentry;
     osa_policy_ent_t pentry = NULL;
     uint32_t result;
@@ -328,7 +328,7 @@ krb5_error_code ipadb_check_policy_as(krb5_context kcontext,
     }
 
     if (ied->pol->max_fail == 0 ||
-        client->fail_auth_count < ied->pol->max_fail) {
+        client->fail_auth_count < (krb5_kvno) ied->pol->max_fail) {
         /* still within allowed failures range */
         return 0;
     }

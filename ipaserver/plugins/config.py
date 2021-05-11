@@ -86,18 +86,16 @@ EXAMPLES:
 register = Registry()
 
 
-def check_fips_auth_opts(fips_mode, **options):
-    """
-    OTP and RADIUS are not allowed in FIPS mode since they use MD5
-    checksums (OTP uses our RADIUS responder daemon ipa-otpd).
-    """
-    if 'ipauserauthtype' in options and fips_mode:
-        if ('otp' in options['ipauserauthtype'] or
-                'radius' in options['ipauserauthtype']):
-            raise errors.InvocationError(
-                'OTP and RADIUS authentication in FIPS is '
-                'not yet supported')
+def validate_search_records_limit(ugettext, value):
+    """Check if value is greater than a realistic minimum.
 
+    Values 0 and -1 are valid, as they represent unlimited.
+    """
+    if value in {-1, 0}:
+        return None
+    if value < 10:
+        return _('must be at least 10')
+    return None
 
 @register()
 class config(LDAPObject):
@@ -175,10 +173,10 @@ class config(LDAPObject):
             minvalue=-1,
         ),
         Int('ipasearchrecordslimit',
+            validate_search_records_limit,
             cli_name='searchrecordslimit',
             label=_('Search size limit'),
             doc=_('Maximum number of records to search (-1 or 0 is unlimited)'),
-            minvalue=-1,
         ),
         IA5Str('ipausersearchfields',
             cli_name='usersearch',
@@ -252,6 +250,18 @@ class config(LDAPObject):
             flags={'virtual_attribute', 'no_create', 'no_update'}
         ),
         Str(
+            'ipa_master_hidden_server*',
+            label=_('Hidden IPA masters'),
+            doc=_('List of all hidden IPA masters'),
+            flags={'virtual_attribute', 'no_create', 'no_update'}
+        ),
+        Str(
+            'pkinit_server_server*',
+            label=_('IPA master capable of PKINIT'),
+            doc=_('IPA master which can process PKINIT requests'),
+            flags={'virtual_attribute', 'no_create', 'no_update'}
+        ),
+        Str(
             'ca_server_server*',
             label=_('IPA CA servers'),
             doc=_('IPA servers configured as certificate authority'),
@@ -264,15 +274,27 @@ class config(LDAPObject):
             flags={'virtual_attribute', 'no_create', 'no_update'}
         ),
         Str(
+            'ca_server_hidden_server*',
+            label=_('Hidden IPA CA servers'),
+            doc=_('Hidden IPA servers configured as certificate authority'),
+            flags={'virtual_attribute', 'no_create', 'no_update'}
+        ),
+        Str(
             'ca_renewal_master_server?',
             label=_('IPA CA renewal master'),
             doc=_('Renewal master for IPA certificate authority'),
             flags={'virtual_attribute', 'no_create'}
         ),
         Str(
-            'pkinit_server_server*',
-            label=_('IPA master capable of PKINIT'),
-            doc=_('IPA master which can process PKINIT requests'),
+            'kra_server_server*',
+            label=_('IPA KRA servers'),
+            doc=_('IPA servers configured as key recovery agent'),
+            flags={'virtual_attribute', 'no_create', 'no_update'}
+        ),
+        Str(
+            'kra_server_hidden_server*',
+            label=_('Hidden IPA KRA servers'),
+            doc=_('Hidden IPA servers configured as key recovery agent'),
             flags={'virtual_attribute', 'no_create', 'no_update'}
         ),
         Str(
@@ -281,7 +303,25 @@ class config(LDAPObject):
             label=_('Domain resolution order'),
             doc=_('colon-separated list of domains used for short name'
                   ' qualification')
-        )
+        ),
+        Str(
+            'dns_server_server*',
+            label=_('IPA DNS servers'),
+            doc=_('IPA servers configured as domain name server'),
+            flags={'virtual_attribute', 'no_create', 'no_update'}
+        ),
+        Str(
+            'dns_server_hidden_server*',
+            label=_('Hidden IPA DNS servers'),
+            doc=_('Hidden IPA servers configured as domain name server'),
+            flags={'virtual_attribute', 'no_create', 'no_update'}
+        ),
+        Str(
+            'dnssec_key_master_server?',
+            label=_('IPA DNSSec key master'),
+            doc=_('DNSec key master'),
+            flags={'virtual_attribute', 'no_create', 'no_update'}
+        ),
     )
 
     def get_dn(self, *keys, **kwargs):
@@ -290,9 +330,20 @@ class config(LDAPObject):
     def update_entry_with_role_config(self, role_name, entry_attrs):
         backend = self.api.Backend.serverroles
 
-        role_config = backend.config_retrieve(role_name)
+        try:
+            role_config = backend.config_retrieve(role_name)
+        except errors.EmptyResult:
+            # No role config means current user identity
+            # has no rights to see it, return with no action
+            return
+
         for key, value in role_config.items():
-            entry_attrs.update({key: value})
+            try:
+                entry_attrs.update({key: value})
+            except errors.EmptyResult:
+                # An update that doesn't change an entry is fine here
+                # Just ignore and move to the next key pair
+                pass
 
 
     def show_servroles_attributes(self, entry_attrs, *roles, **options):
@@ -349,7 +400,7 @@ class config(LDAPObject):
             )
 
         try:
-            validate_domain_name(domain)
+            validate_domain_name(domain, check_sld=True)
         except ValueError as e:
             raise errors.ValidationError(
                 name=attr_name,
@@ -412,8 +463,6 @@ class config_mod(LDAPUpdate):
 
     def pre_callback(self, ldap, dn, entry_attrs, attrs_list, *keys, **options):
         assert isinstance(dn, DN)
-        check_fips_auth_opts(fips_mode=self.api.env.fips_mode, **options)
-
         if 'ipadefaultprimarygroup' in entry_attrs:
             group=entry_attrs['ipadefaultprimarygroup']
             try:
@@ -434,7 +483,7 @@ class config_mod(LDAPUpdate):
                               for field in entry_attrs[k].split(',')]
                 # test if all base types (without sub-types) are allowed
                 for a in attributes:
-                    a, _dummy, _dummy = a.partition(';')
+                    a, _unused1, _unused2 = a.partition(';')
                     if a not in allowed_attrs:
                         raise errors.ValidationError(
                             name=k, error=_('attribute "%s" not allowed') % a
@@ -466,7 +515,7 @@ class config_mod(LDAPUpdate):
                 if self.api.Object[obj].uuid_attribute:
                     checked_attrs = checked_attrs + [self.api.Object[obj].uuid_attribute]
                 for obj_attr in checked_attrs:
-                    obj_attr, _dummy, _dummy = obj_attr.partition(';')
+                    obj_attr, _unused1, _unused2 = obj_attr.partition(';')
                     if obj_attr in OPERATIONAL_ATTRIBUTES:
                         continue
                     if obj_attr in self.api.Object[obj].params and \
@@ -553,7 +602,8 @@ class config_mod(LDAPUpdate):
 
     def post_callback(self, ldap, dn, entry_attrs, *keys, **options):
         self.obj.show_servroles_attributes(
-            entry_attrs, "CA server", "IPA master", "NTP server", **options)
+            entry_attrs, "CA server", "KRA server", "IPA master",
+            "NTP server", "DNS server", **options)
         return dn
 
 
@@ -563,5 +613,6 @@ class config_show(LDAPRetrieve):
 
     def post_callback(self, ldap, dn, entry_attrs, *keys, **options):
         self.obj.show_servroles_attributes(
-            entry_attrs, "CA server", "IPA master", "NTP server", **options)
+            entry_attrs, "CA server", "KRA server", "IPA master",
+            "NTP server", "DNS server", **options)
         return dn

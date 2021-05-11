@@ -26,7 +26,6 @@ import datetime
 from decimal import Decimal
 from copy import deepcopy
 import contextlib
-import collections
 import os
 import pwd
 import warnings
@@ -36,11 +35,12 @@ from six.moves.urllib.parse import urlparse
 # pylint: enable=import-error
 
 from cryptography import x509 as crypto_x509
+from cryptography.hazmat.primitives import serialization
 
 import ldap
 import ldap.sasl
 import ldap.filter
-from ldap.controls import SimplePagedResultsControl
+from ldap.controls import SimplePagedResultsControl, GetEffectiveRightsControl
 import six
 
 # pylint: disable=ipa-forbidden-import
@@ -51,6 +51,13 @@ from ipapython.ipautil import format_netloc, CIDict
 from ipapython.dn import DN
 from ipapython.dnsutil import DNSName
 from ipapython.kerberos import Principal
+
+# pylint: disable=no-name-in-module, import-error
+if six.PY3:
+    from collections.abc import MutableMapping
+else:
+    from collections import MutableMapping
+# pylint: enable=no-name-in-module, import-error
 
 if six.PY3:
     unicode = str
@@ -83,6 +90,34 @@ if six.PY2 and hasattr(ldap, 'LDAPBytesWarning'):
         action="ignore",
         category=ldap.LDAPBytesWarning,  # pylint: disable=no-member
     )
+
+
+def ldap_initialize(uri, cacertfile=None):
+    """Wrapper around ldap.initialize()
+    """
+    conn = ldap.initialize(uri)
+
+    if not uri.startswith('ldapi://'):
+        if cacertfile:
+            conn.set_option(ldap.OPT_X_TLS_CACERTFILE, cacertfile)
+            newctx = True
+        else:
+            newctx = False
+
+        req_cert = conn.get_option(ldap.OPT_X_TLS_REQUIRE_CERT)
+        if req_cert != ldap.OPT_X_TLS_DEMAND:
+            # libldap defaults to cert validation, but the default can be
+            # overridden in global or user local ldap.conf.
+            conn.set_option(
+                ldap.OPT_X_TLS_REQUIRE_CERT, ldap.OPT_X_TLS_DEMAND
+            )
+            newctx = True
+
+        # reinitialize TLS context
+        if newctx:
+            conn.set_option(ldap.OPT_X_TLS_NEWCTX, 0)
+
+    return conn
 
 
 class _ServerSchema(object):
@@ -167,18 +202,17 @@ class SchemaCache(object):
             info = e.args[0].get('info', '').strip()
             raise errors.DatabaseError(desc = u'uri=%s' % url,
                                 info = u'Unable to retrieve LDAP schema: %s: %s' % (desc, info))
-        except IndexError:
-            # no 'cn=schema' entry in LDAP? some servers use 'cn=subschema'
-            # TODO: DS uses 'cn=schema', support for other server?
-            #       raise a more appropriate exception
-            raise
+
+        # no 'cn=schema' entry in LDAP? some servers use 'cn=subschema'
+        # TODO: DS uses 'cn=schema', support for other server?
+        #       raise a more appropriate exception
 
         return ldap.schema.SubSchema(schema_entry[1])
 
 schema_cache = SchemaCache()
 
 
-class LDAPEntry(collections.MutableMapping):
+class LDAPEntry(MutableMapping):
     __slots__ = ('_conn', '_dn', '_names', '_nice', '_raw', '_sync',
                  '_not_list', '_orig_raw', '_raw_view',
                  '_single_value_view')
@@ -525,10 +559,13 @@ class LDAPEntry(collections.MutableMapping):
                     raise errors.OnlyOneValueAllowed(attr=name)
                 modlist.append((ldap.MOD_REPLACE, name, adds))
             else:
-                if adds:
-                    modlist.append((ldap.MOD_ADD, name, adds))
+                # dels before adds, in case the same value occurs in
+                # both due to encoding differences
+                # (https://pagure.io/freeipa/issue/7750)
                 if dels:
                     modlist.append((ldap.MOD_DELETE, name, dels))
+                if adds:
+                    modlist.append((ldap.MOD_ADD, name, adds))
 
         # Usually the modlist order does not matter.
         # However, for schema updates, we want 'attributetypes' before
@@ -542,7 +579,7 @@ class LDAPEntry(collections.MutableMapping):
         return iter(self._nice)
 
 
-class LDAPEntryView(collections.MutableMapping):
+class LDAPEntryView(MutableMapping):
     __slots__ = ('_entry',)
 
     def __init__(self, entry):
@@ -988,7 +1025,12 @@ class LDAPClient(object):
         except ldap.NO_SUCH_OBJECT:
             raise errors.NotFound(reason=arg_desc or 'no such entry')
         except ldap.ALREADY_EXISTS:
+            # entry already exists
             raise errors.DuplicateEntry()
+        except ldap.TYPE_OR_VALUE_EXISTS:
+            # attribute type or attribute value already exists, usually only
+            # occurs, when two machines try to write at the same time.
+            raise errors.DuplicateEntry(message=unicode(desc))
         except ldap.CONSTRAINT_VIOLATION:
             # This error gets thrown by the uniqueness plugin
             _msg = 'Another entry with the same attribute value already exists'
@@ -1091,13 +1133,7 @@ class LDAPClient(object):
 
     def _connect(self):
         with self.error_handler():
-            conn = ldap.initialize(self.ldap_uri)
-
-            if self._start_tls or self._protocol == 'ldaps':
-                ldap.set_option(ldap.OPT_X_TLS_CACERTFILE, self._cacert)
-                ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, True)
-                conn.set_option(ldap.OPT_X_TLS_DEMAND, True)
-
+            conn = ldap_initialize(self.ldap_uri, cacertfile=self._cacert)
             if self._sasl_nocanon:
                 conn.set_option(ldap.OPT_X_SASL_NOCANON, ldap.OPT_ON)
 
@@ -1204,7 +1240,7 @@ class LDAPClient(object):
 
         assert isinstance(filters, (list, tuple))
 
-        filters = [f for f in filters if f]
+        filters = [fx for fx in filters if fx]
         if filters and rules == cls.MATCH_NONE:  # unary operator
             return '(%s%s)' % (cls.MATCH_NONE,
                                cls.combine_filters(filters, cls.MATCH_ANY))
@@ -1249,6 +1285,8 @@ class LDAPClient(object):
             ]
             return cls.combine_filters(flts, rules)
         elif value is not None:
+            if isinstance(value, crypto_x509.Certificate):
+                value = value.public_bytes(serialization.Encoding.DER)
             if isinstance(value, bytes):
                 value = binascii.hexlify(value).decode('ascii')
                 # value[-2:0] is empty string for the initial '\\'
@@ -1318,7 +1356,7 @@ class LDAPClient(object):
         return cls.combine_filters(flts, rules)
 
     def get_entries(self, base_dn, scope=ldap.SCOPE_SUBTREE, filter=None,
-                    attrs_list=None, **kwargs):
+                    attrs_list=None, get_effective_rights=False, **kwargs):
         """Return a list of matching entries.
 
         :raises: errors.LimitsExceeded if the list is truncated by the server
@@ -1329,11 +1367,13 @@ class LDAPClient(object):
         :param scope: search scope, see LDAP docs (default ldap2.SCOPE_SUBTREE)
         :param filter: LDAP filter to apply
         :param attrs_list: ist of attributes to return, all if None (default)
+        :param get_effective_rights: use GetEffectiveRights control
         :param kwargs: additional keyword arguments. See find_entries method
         for their description.
         """
         entries, truncated = self.find_entries(
             base_dn=base_dn, scope=scope, filter=filter, attrs_list=attrs_list,
+            get_effective_rights=get_effective_rights,
             **kwargs)
         try:
             self.handle_truncated_result(truncated)
@@ -1346,9 +1386,10 @@ class LDAPClient(object):
 
         return entries
 
-    def find_entries(self, filter=None, attrs_list=None, base_dn=None,
-                     scope=ldap.SCOPE_SUBTREE, time_limit=None,
-                     size_limit=None, paged_search=False):
+    def find_entries(
+            self, filter=None, attrs_list=None, base_dn=None,
+            scope=ldap.SCOPE_SUBTREE, time_limit=None, size_limit=None,
+            paged_search=False, get_effective_rights=False):
         """
         Return a list of entries and indication of whether the results were
         truncated ([(dn, entry_attrs)], truncated) matching specified search
@@ -1356,13 +1397,16 @@ class LDAPClient(object):
         search hit a server limit and its results are incomplete.
 
         Keyword arguments:
-        attrs_list -- list of attributes to return, all if None (default None)
-        base_dn -- dn of the entry at which to start the search (default '')
-        scope -- search scope, see LDAP docs (default ldap2.SCOPE_SUBTREE)
-        time_limit -- time limit in seconds (default unlimited)
-        size_limit -- size (number of entries returned) limit
-            (default unlimited)
-        paged_search -- search using paged results control
+        :param attrs_list: list of attributes to return, all if None
+                           (default None)
+        :param base_dn: dn of the entry at which to start the search
+                        (default '')
+        :param scope: search scope, see LDAP docs (default ldap2.SCOPE_SUBTREE)
+        :param time_limit: time limit in seconds (default unlimited)
+        :param size_limit: size (number of entries returned) limit
+                           (default unlimited)
+        :param paged_search: search using paged results control
+        :param get_effective_rights: use GetEffectiveRights control
 
         :raises: errors.NotFound if result set is empty
                                  or base_dn doesn't exist
@@ -1391,7 +1435,10 @@ class LDAPClient(object):
         if attrs_list:
             attrs_list = [a.lower() for a in set(attrs_list)]
 
-        sctrls = None
+        base_sctrls = []
+        if get_effective_rights:
+            base_sctrls.append(self.__get_effective_rights_control())
+
         cookie = ''
         page_size = (size_limit if size_limit > 0 else 2000) - 1
         if page_size == 0:
@@ -1405,7 +1452,11 @@ class LDAPClient(object):
 
             while True:
                 if paged_search:
-                    sctrls = [SimplePagedResultsControl(0, page_size, cookie)]
+                    sctrls = base_sctrls + [
+                        SimplePagedResultsControl(0, page_size, cookie)
+                    ]
+                else:
+                    sctrls = base_sctrls or None
 
                 try:
                     id = self.conn.search_ext(
@@ -1448,9 +1499,9 @@ class LDAPClient(object):
                                 str(base_dn), scope, filter, attrs_list,
                                 serverctrls=sctrls, timeout=time_limit,
                                 sizelimit=size_limit)
-                        except ldap.LDAPError as e:
+                        except ldap.LDAPError as e2:
                             logger.warning(
-                                "Error cancelling paged search: %s", e)
+                                "Error cancelling paged search: %s", e2)
                         cookie = ''
 
                     try:
@@ -1467,6 +1518,12 @@ class LDAPClient(object):
             raise errors.EmptyResult(reason='no matching entry found')
 
         return (res, truncated)
+
+    def __get_effective_rights_control(self):
+        """Construct a GetEffectiveRights control for current user."""
+        bind_dn = self.conn.whoami_s()[4:]
+        return GetEffectiveRightsControl(
+                True, "dn: {0}".format(bind_dn).encode('utf-8'))
 
     def find_entry_by_attr(self, attr, value, object_class, attrs_list=None,
                            base_dn=None):
@@ -1493,7 +1550,7 @@ class LDAPClient(object):
         return entries[0]
 
     def get_entry(self, dn, attrs_list=None, time_limit=None,
-                  size_limit=None):
+                  size_limit=None, get_effective_rights=False):
         """
         Get entry (dn, entry_attrs) by dn.
 
@@ -1505,7 +1562,7 @@ class LDAPClient(object):
 
         entries = self.get_entries(
             dn, self.SCOPE_BASE, None, attrs_list, time_limit=time_limit,
-            size_limit=size_limit
+            size_limit=size_limit, get_effective_rights=get_effective_rights,
         )
 
         return entries[0]

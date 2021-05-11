@@ -25,9 +25,12 @@ This base platform module exports default filesystem paths.
 class BasePathNamespace(object):
     BASH = "/bin/bash"
     BIN_HOSTNAMECTL = "/bin/hostnamectl"
+    ECHO = "/bin/echo"
+    GZIP = "/usr/bin/gzip"
     LS = "/bin/ls"
     SH = "/bin/sh"
     SYSTEMCTL = "/bin/systemctl"
+    SYSTEMD_DETECT_VIRT = "/bin/systemd-detect-virt"
     TAR = "/bin/tar"
     AUTOFS_LDAP_AUTH_CONF = "/etc/autofs_ldap_auth.conf"
     ETC_DIRSRV = "/etc/dirsrv"
@@ -48,6 +51,8 @@ class BasePathNamespace(object):
     HTTPD_IPA_CONF = "/etc/httpd/conf.d/ipa.conf"
     HTTPD_NSS_CONF = "/etc/httpd/conf.d/nss.conf"
     HTTPD_SSL_CONF = "/etc/httpd/conf.d/ssl.conf"
+    # only used on Fedora
+    HTTPD_IPA_WSGI_MODULES_CONF = None
     OLD_IPA_KEYTAB = "/etc/httpd/conf/ipa.keytab"
     HTTP_KEYTAB = "/var/lib/ipa/gssproxy/http.keytab"
     HTTPD_PASSWORD_CONF = "/etc/httpd/conf/password.conf"
@@ -94,6 +99,7 @@ class BasePathNamespace(object):
     PKI_TOMCAT = "/etc/pki/pki-tomcat"
     PKI_TOMCAT_ALIAS_DIR = "/etc/pki/pki-tomcat/alias"
     PKI_TOMCAT_PASSWORD_CONF = "/etc/pki/pki-tomcat/password.conf"
+    PKI_TOMCAT_SERVER_XML = "/etc/pki/pki-tomcat/server.xml"
     ETC_REDHAT_RELEASE = "/etc/redhat-release"
     RESOLV_CONF = "/etc/resolv.conf"
     SAMBA_KEYTAB = "/etc/samba/samba.keytab"
@@ -158,8 +164,10 @@ class BasePathNamespace(object):
     GPG = "/usr/bin/gpg"
     GPG_AGENT = "/usr/bin/gpg-agent"
     IPA_GETCERT = "/usr/bin/ipa-getcert"
+    KADMIN_LOCAL = '/usr/sbin/kadmin.local'
     KDESTROY = "/usr/bin/kdestroy"
     KINIT = "/usr/bin/kinit"
+    KLIST = "/usr/bin/klist"
     BIN_KVNO = "/usr/bin/kvno"
     LDAPMODIFY = "/usr/bin/ldapmodify"
     LDAPPASSWD = "/usr/bin/ldappasswd"
@@ -205,6 +213,7 @@ class BasePathNamespace(object):
     GROUPADD = "/usr/sbin/groupadd"
     USERMOD = "/usr/sbin/usermod"
     HTTPD = "/usr/sbin/httpd"
+    IPA_CLIENT_AUTOMOUNT = "/usr/sbin/ipa-client-automount"
     IPA_CLIENT_INSTALL = "/usr/sbin/ipa-client-install"
     IPA_DNS_INSTALL = "/usr/sbin/ipa-dns-install"
     SBIN_IPA_JOIN = "/usr/sbin/ipa-join"
@@ -269,6 +278,8 @@ class BasePathNamespace(object):
     DNSSEC_TOKENS_DIR = "/var/lib/ipa/dnssec/tokens"
     DNSSEC_SOFTHSM_PIN = "/var/lib/ipa/dnssec/softhsm_pin"
     IPA_CA_CSR = "/var/lib/ipa/ca.csr"
+    IPA_CACERT_MANAGE = "/usr/sbin/ipa-cacert-manage"
+    IPA_CERTUPDATE = "/usr/sbin/ipa-certupdate"
     PKI_CA_PUBLISH_DIR = "/var/lib/ipa/pki-ca/publish"
     REPLICA_INFO_TEMPLATE = "/var/lib/ipa/replica-info-%s"
     REPLICA_INFO_GPG_TEMPLATE = "/var/lib/ipa/replica-info-%s.gpg"
@@ -289,6 +300,7 @@ class BasePathNamespace(object):
     SSSD_DB = "/var/lib/sss/db"
     SSSD_MC_GROUP = "/var/lib/sss/mc/group"
     SSSD_MC_PASSWD = "/var/lib/sss/mc/passwd"
+    SSSD_PUBCONF_DIR = "/var/lib/sss/pubconf"
     SSSD_PUBCONF_KNOWN_HOSTS = "/var/lib/sss/pubconf/known_hosts"
     SSSD_PUBCONF_KRB5_INCLUDE_D_DIR = "/var/lib/sss/pubconf/krb5.include.d/"
     VAR_LOG_AUDIT = "/var/log/audit/audit.log"
@@ -309,10 +321,12 @@ class BasePathNamespace(object):
     IPASERVER_KRA_INSTALL_LOG = "/var/log/ipaserver-kra-install.log"
     IPASERVER_UNINSTALL_LOG = "/var/log/ipaserver-uninstall.log"
     IPAUPGRADE_LOG = "/var/log/ipaupgrade.log"
+    IPATRUSTENABLEAGENT_LOG = "/var/log/ipatrust-enable-agent.log"
     KADMIND_LOG = "/var/log/kadmind.log"
     KRB5KDC_LOG = "/var/log/krb5kdc.log"
     MESSAGES = "/var/log/messages"
     VAR_LOG_PKI_DIR = "/var/log/pki/"
+    BIN_TOMCAT = "/usr/sbin/tomcat"
     TOMCAT_TOPLEVEL_DIR = "/var/log/pki/pki-tomcat"
     TOMCAT_CA_DIR = "/var/log/pki/pki-tomcat/ca"
     TOMCAT_CA_ARCHIVE_DIR = "/var/log/pki/pki-tomcat/ca/archive"
@@ -357,6 +371,9 @@ class BasePathNamespace(object):
     IF_INET6 = '/proc/net/if_inet6'
     AUTHCONFIG = None
     IPA_SERVER_UPGRADE = '/usr/sbin/ipa-server-upgrade'
+    KEYCTL = '/usr/bin/keyctl'
+    GETENT = '/usr/bin/getent'
+    SSHD = '/usr/sbin/sshd'
 
 
 paths = BasePathNamespace()

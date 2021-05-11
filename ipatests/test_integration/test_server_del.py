@@ -2,10 +2,14 @@
 # Copyright (C) 2016  FreeIPA Contributors see COPYING for license
 #
 
+from __future__ import absolute_import
+
 from itertools import permutations
+import ipaplatform
+import pytest
 
 from ipatests.test_integration.base import IntegrationTest
-from ipatests.pytest_plugins.integration import tasks
+from ipatests.pytest_ipa.integration import tasks
 from ipalib.constants import DOMAIN_LEVEL_1, DOMAIN_SUFFIX_NAME, CA_SUFFIX_NAME
 
 REMOVAL_ERR_TEMPLATE = ("Removal of '{hostname}' leads to disconnected "
@@ -103,6 +107,7 @@ class TestServerDel(ServerDelBase):
         #                    \
         #   replica1------- replica2
 
+
         tasks.create_segment(cls.client, cls.replica1, cls.replica2)
         tasks.create_segment(cls.client, cls.replica1, cls.replica2,
                              suffix=CA_SUFFIX_NAME)
@@ -167,6 +172,9 @@ class TestServerDel(ServerDelBase):
             affected_suffixes=(CA_SUFFIX_NAME,)
         )
 
+    @pytest.mark.xfail(
+        ipaplatform.NAME == 'fedora',
+        reason='https://pagure.io/389-ds-base/issue/49972')
     def test_ignore_topology_disconnect_replica1(self):
         """
         tests that removal of replica1 with '--ignore-topology-disconnect'
@@ -179,13 +187,13 @@ class TestServerDel(ServerDelBase):
         )
 
         # reinstall the replica
-        tasks.uninstall_master(self.replica1)
+        tasks.uninstall_master(self.replica1, domain_level=self.domain_level)
         tasks.install_replica(self.master, self.replica1, setup_ca=True)
 
     def test_ignore_topology_disconnect_replica2(self):
         """
         tests that removal of replica2 with '--ignore-topology-disconnect'
-        destroys master for good
+        destroys master for good with verbose option for uninstallation
         """
         check_master_removal(
             self.client,
@@ -194,9 +202,13 @@ class TestServerDel(ServerDelBase):
         )
 
         # reinstall the replica
-        tasks.uninstall_master(self.replica2)
+        tasks.uninstall_master(self.replica2, verbose=True,
+                               domain_level=self.domain_level)
         tasks.install_replica(self.master, self.replica2, setup_ca=True)
 
+    @pytest.mark.xfail(
+        ipaplatform.NAME == 'fedora',
+        reason='https://pagure.io/389-ds-base/issue/49972')
     def test_removal_of_master_disconnects_both_topologies(self):
         """
         tests that master removal will now raise errors in both suffixes.
@@ -241,23 +253,6 @@ class TestLastServices(ServerDelBase):
             cls.topology, cls.master, cls.replicas, [],
             domain_level=cls.domain_level, setup_replica_cas=False)
 
-    def test_removal_of_master_raises_error_about_last_ca(self):
-        """
-        test that removal of master fails on the last
-        """
-        tasks.assert_error(
-            tasks.run_server_del(self.replicas[0], self.master.hostname),
-            "Deleting this server is not allowed as it would leave your "
-            "installation without a CA.",
-            1
-        )
-
-    def test_install_ca_on_replica1(self):
-        """
-        Install CA on replica so that we can test DNS-related checks
-        """
-        tasks.install_ca(self.replicas[0], domain_level=self.domain_level)
-
     def test_removal_of_master_raises_error_about_last_dns(self):
         """
         Now server-del should complain about the removal of last DNS server
@@ -288,6 +283,32 @@ class TestLastServices(ServerDelBase):
             "Replica is active DNSSEC key master. Uninstall "
             "could break your DNS system. Please disable or replace "
             "DNSSEC key master first.",
+            1
+        )
+
+    def test_disable_dnssec_on_master(self):
+        """
+        Disable DNSSec master so that it is not tested anymore. Normal way
+        would be to move the DNSSec master to replica, but that is tested in
+        DNSSec tests.
+        """
+        args = [
+            "ipa-dns-install",
+            "--disable-dnssec-master",
+            "--forwarder", self.master.config.dns_forwarder,
+            "--force",
+            "-U",
+        ]
+        self.master.run_command(args)
+
+    def test_removal_of_master_raises_error_about_last_ca(self):
+        """
+        test that removal of master fails on the last
+        """
+        tasks.assert_error(
+            tasks.run_server_del(self.replicas[0], self.master.hostname),
+            "Deleting this server is not allowed as it would leave your "
+            "installation without a CA.",
             1
         )
 

@@ -127,6 +127,7 @@ def strip_ldap_prefix(uri):
 def prevalidate_filter(ugettext, value):
     if not value.startswith('(') or not value.endswith(')'):
         return _('must be enclosed in parentheses')
+    return None
 
 
 class DNOrURL(DNParam):
@@ -148,6 +149,7 @@ def validate_type(ugettext, typestr):
         return _('"%s" is not an object type') % typestr
     if not getattr(obj, 'permission_filter_objectclasses', None):
         return _('"%s" is not a valid permission type') % typestr
+    return None
 
 
 def _disallow_colon(option):
@@ -484,7 +486,7 @@ class permission(baseldap.LDAPObject):
 
             if old_client:
                 for old_name, new_name in _DEPRECATED_OPTION_ALIASES.items():
-                    if new_name in entry:
+                    if new_name in rights:
                         rights[old_name] = rights[new_name]
                         del rights[new_name]
 
@@ -904,6 +906,8 @@ class permission(baseldap.LDAPObject):
             options['ipapermtargetfilter'] = list(options.get(
                 'ipapermtargetfilter') or []) + filter_ops['add']
 
+        return None
+
     def validate_permission(self, entry):
         ldap = self.Backend.ldap2
 
@@ -1295,10 +1299,9 @@ class permission_find(baseldap.LDAPSearch):
                 self.obj.upgrade_permission(entry, output_only=True)
 
         if not truncated:
-            if 'sizelimit' in options:
-                max_entries = options['sizelimit']
-            else:
-                max_entries = self.api.Backend.ldap2.size_limit
+            max_entries = options.get(
+                'sizelimit', self.api.Backend.ldap2.size_limit
+            )
 
             if max_entries > 0:
                 # should we get more entries than current sizelimit, fail

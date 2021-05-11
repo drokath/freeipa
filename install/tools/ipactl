@@ -29,6 +29,7 @@ import ldapurl
 from ipaserver.install import service, installutils
 from ipaserver.install.dsinstance import config_dirname
 from ipaserver.install.installutils import is_ipa_configured, ScriptError
+from ipaserver.masters import ENABLED_SERVICE, HIDDEN_SERVICE
 from ipalib import api, errors
 from ipapython.ipaldap import LDAPClient
 from ipapython.ipautil import wait_for_open_ports, wait_for_open_socket
@@ -162,7 +163,16 @@ def version_check():
 
 def get_config(dirsrv):
     base = DN(('cn', api.env.host), ('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'), api.env.basedn)
-    srcfilter = '(ipaConfigString=enabledService)'
+    srcfilter = LDAPClient.combine_filters(
+        [
+            LDAPClient.make_filter({'objectClass': 'ipaConfigObject'}),
+            LDAPClient.make_filter(
+                {'ipaConfigString': [ENABLED_SERVICE, HIDDEN_SERVICE]},
+                rules=LDAPClient.MATCH_ANY
+            ),
+        ],
+        rules=LDAPClient.MATCH_ALL
+    )
     attrs = ['cn', 'ipaConfigString']
     if not dirsrv.is_running():
         raise IpactlError("Failed to get list of services to probe status:\n" +
@@ -224,10 +234,10 @@ def get_config(dirsrv):
         svc_list.append([order, name])
 
     ordered_list = []
-    for (order, svc) in sorted(svc_list):
+    for order, svc in sorted(svc_list):
         if svc in service.SERVICE_LIST:
-            ordered_list.append(service.SERVICE_LIST[svc][0])
-    return ordered_list
+            ordered_list.append(service.SERVICE_LIST[svc].systemd_name)
+    return deduplicate(ordered_list)
 
 def get_config_from_file():
 
@@ -253,7 +263,7 @@ def get_config_from_file():
         if svc in svc_list:
             ordered_list.append(svc)
 
-    return ordered_list
+    return deduplicate(ordered_list)
 
 
 def stop_services(svc_list):
@@ -315,7 +325,6 @@ def ipa_start(options):
         # no service to start
         return
 
-    svc_list = deduplicate(svc_list)
     for svc in svc_list:
         svchandle = services.service(svc, api=api)
         try:
@@ -355,7 +364,6 @@ def ipa_stop(options):
             finally:
                 raise IpactlError()
 
-    svc_list = deduplicate(svc_list)
     for svc in reversed(svc_list):
         svchandle = services.service(svc, api=api)
         try:
@@ -442,7 +450,6 @@ def ipa_restart(options):
 
     if len(old_svc_list) != 0:
         # we need to definitely stop some services
-        old_svc_list = deduplicate(old_svc_list)
         for svc in reversed(old_svc_list):
             svchandle = services.service(svc, api=api)
             try:
@@ -467,7 +474,6 @@ def ipa_restart(options):
 
     if len(svc_list) != 0:
         # there are services to restart
-        svc_list = deduplicate(svc_list)
         for svc in svc_list:
             svchandle = services.service(svc, api=api)
             try:
@@ -490,7 +496,6 @@ def ipa_restart(options):
 
     if len(new_svc_list) != 0:
         # we still need to start some services
-        new_svc_list = deduplicate(new_svc_list)
         for svc in new_svc_list:
             svchandle = services.service(svc, api=api)
             try:
@@ -542,7 +547,6 @@ def ipa_status(options):
     if len(svc_list) == 0:
         return
 
-    svc_list = deduplicate(svc_list)
     for svc in svc_list:
         svchandle = services.service(svc, api=api)
         try:

@@ -6,7 +6,7 @@
 CA installer module
 """
 
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 
 import enum
 import logging
@@ -20,10 +20,7 @@ from ipalib.install.service import enroll_only, master_install_only, replica_ins
 from ipaserver.install import sysupgrade
 from ipapython.install import typing
 from ipapython.install.core import group, knob, extend_knob
-from ipaserver.install import (cainstance,
-                               custodiainstance,
-                               dsinstance,
-                               bindinstance)
+from ipaserver.install import cainstance, bindinstance, dsinstance
 from ipapython import ipautil, certdb
 from ipapython.admintool import ScriptError
 from ipaplatform import services
@@ -33,7 +30,7 @@ from ipaserver.install.replication import replica_conn_check
 from ipalib import api, errors
 from ipapython.dn import DN
 
-from . import conncheck, dogtag
+from . import conncheck, dogtag, cainstance
 
 if six.PY3:
     unicode = str
@@ -97,6 +94,37 @@ def set_subject_base_in_config(subject_base):
         api.Backend.ldap2.update_entry(entry_attrs)
     except errors.EmptyModlist:
         pass
+
+
+def uninstall_check(options):
+    """Check if the host is CRL generation master"""
+    # Skip the checks if the host is not a CA instance
+    ca = cainstance.CAInstance(api.env.realm)
+    if not (api.Command.ca_is_enabled()['result'] and
+       cainstance.is_ca_installed_locally()):
+        return
+
+    # skip the checks if the host is the last master
+    ipa_config = api.Command.config_show()['result']
+    ipa_masters = ipa_config.get('ipa_master_server', [])
+    if len(ipa_masters) <= 1:
+        return
+
+    try:
+        crlgen_enabled = ca.is_crlgen_enabled()
+    except cainstance.InconsistentCRLGenConfigException:
+        # If config is inconsistent, let's be safe and act as if
+        # crl gen was enabled
+        crlgen_enabled = True
+
+    if crlgen_enabled:
+        print("Deleting this server will leave your installation "
+              "without a CRL generation master.")
+        if (options.unattended and not options.ignore_last_of_role) or \
+           not (options.unattended or ipautil.user_input(
+                "Are you sure you want to continue with the uninstall "
+                "procedure?", False)):
+            raise ScriptError("Aborting uninstall operation.")
 
 
 def install_check(standalone, replica_config, options):
@@ -222,12 +250,12 @@ def install_check(standalone, replica_config, options):
                         "cannot continue." % (subject, db.secdir))
 
 
-def install(standalone, replica_config, options):
-    install_step_0(standalone, replica_config, options)
-    install_step_1(standalone, replica_config, options)
+def install(standalone, replica_config, options, custodia):
+    install_step_0(standalone, replica_config, options, custodia=custodia)
+    install_step_1(standalone, replica_config, options, custodia=custodia)
 
 
-def install_step_0(standalone, replica_config, options):
+def install_step_0(standalone, replica_config, options, custodia):
     realm_name = options.realm_name
     dm_password = options.dm_password
     host_name = options.host_name
@@ -260,11 +288,7 @@ def install_step_0(standalone, replica_config, options):
     else:
         cafile = os.path.join(replica_config.dir, 'cacert.p12')
         if options.promote:
-            custodia = custodiainstance.CustodiaInstance(
-                replica_config.host_name,
-                replica_config.realm_name)
             custodia.get_ca_keys(
-                replica_config.ca_host_name,
                 cafile,
                 replica_config.dirman_password)
 
@@ -289,7 +313,9 @@ def install_step_0(standalone, replica_config, options):
         'certmap.conf', 'subject_base', str(subject_base))
     dsinstance.write_certmap_conf(realm_name, ca_subject)
 
-    ca = cainstance.CAInstance(realm_name, host_name=host_name)
+    ca = cainstance.CAInstance(
+        realm=realm_name, host_name=host_name, custodia=custodia
+    )
     ca.configure_instance(host_name, dm_password, dm_password,
                           subject_base=subject_base,
                           ca_subject=ca_subject,
@@ -308,7 +334,7 @@ def install_step_0(standalone, replica_config, options):
                           use_ldaps=standalone)
 
 
-def install_step_1(standalone, replica_config, options):
+def install_step_1(standalone, replica_config, options, custodia):
     if replica_config is not None and not replica_config.setup_ca:
         return
 
@@ -317,7 +343,9 @@ def install_step_1(standalone, replica_config, options):
     subject_base = options._subject_base
     basedn = ipautil.realm_to_suffix(realm_name)
 
-    ca = cainstance.CAInstance(realm_name, host_name=host_name)
+    ca = cainstance.CAInstance(
+        realm=realm_name, host_name=host_name, custodia=custodia
+    )
 
     ca.stop('pki-tomcat')
 

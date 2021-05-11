@@ -40,6 +40,7 @@ from ipaserver.dns_data_management import (
 from ipaserver.install import installutils
 from ipaserver.install import service
 from ipaserver.install import sysupgrade
+from ipaserver.masters import get_masters
 from ipapython import ipautil
 from ipapython import dnsutil
 from ipapython.dnsutil import DNSName
@@ -137,6 +138,7 @@ def named_conf_get_directive(name, section=NAMED_SECTION_IPA, str_val=True):
 
                 if match and name == match.group('name'):
                     return match.group('value')
+    return None
 
 def named_conf_set_directive(name, value, section=NAMED_SECTION_IPA,
                              str_val=True):
@@ -302,7 +304,7 @@ def read_reverse_zone(default, ip_address, allow_zone_overlap=False):
     return normalize_zone(zone)
 
 
-def get_auto_reverse_zones(ip_addresses):
+def get_auto_reverse_zones(ip_addresses, allow_zone_overlap=False):
     auto_zones = []
     for ip in ip_addresses:
         if ipautil.reverse_record_exists(ip):
@@ -310,12 +312,13 @@ def get_auto_reverse_zones(ip_addresses):
             logger.info("Reverse record for IP address %s already exists", ip)
             continue
         default_reverse = get_reverse_zone_default(ip)
-        try:
-            dnsutil.check_zone_overlap(default_reverse)
-        except ValueError:
-            logger.info("Reverse zone %s for IP address %s already exists",
-                        default_reverse, ip)
-            continue
+        if not allow_zone_overlap:
+            try:
+                dnsutil.check_zone_overlap(default_reverse)
+            except ValueError:
+                logger.info("Reverse zone %s for IP address %s already exists",
+                            default_reverse, ip)
+                continue
         auto_zones.append((ip, default_reverse))
     return auto_zones
 
@@ -486,7 +489,8 @@ def check_reverse_zones(ip_addresses, reverse_zones, options, unattended,
             ips_missing_reverse.append(ip)
 
     # create reverse zone for IP addresses that does not have one
-    for (ip, rz) in get_auto_reverse_zones(ips_missing_reverse):
+    for (ip, rz) in get_auto_reverse_zones(ips_missing_reverse,
+                                           options.allow_zone_overlap):
         if options.auto_reverse:
             logger.info("Reverse zone %s will be created", rz)
             checked_reverse_zones.append(rz)
@@ -669,7 +673,7 @@ class BindInstance(service.Service):
         return normalize_zone(self.host_domain) == normalize_zone(self.domain)
 
     def create_file_with_system_records(self):
-        system_records = IPASystemRecords(self.api)
+        system_records = IPASystemRecords(self.api, all_servers=True)
         text = u'\n'.join(
             IPASystemRecords.records_list_from_zone(
                 system_records.get_base_records()
@@ -746,7 +750,7 @@ class BindInstance(service.Service):
         # Instead we reply on the IPA init script to start only enabled
         # components as found in our LDAP configuration tree
         try:
-            self.ldap_enable('DNS', self.fqdn, None, self.suffix)
+            self.ldap_configure('DNS', self.fqdn, None, self.suffix)
         except errors.DuplicateEntry:
             # service already exists (forced DNS reinstall)
             # don't crash, just report error
@@ -844,10 +848,13 @@ class BindInstance(service.Service):
 
         # Add forward and reverse records to self
         for addr in addrs:
-            try:
+            # Check first if the zone is a master zone
+            # (if it is a forward zone, dns_zone_exists will return False)
+            if dns_zone_exists(zone, api=self.api):
                 add_fwd_rr(zone, host, addr, self.api)
-            except errors.NotFound:
-                pass
+            else:
+                logger.debug("Skip adding record %s to a zone %s "
+                             "not managed by IPA", addr, zone)
 
             reverse_zone = find_reverse_zone(addr, self.api)
             if reverse_zone:
@@ -858,8 +865,7 @@ class BindInstance(service.Service):
 
     def __add_others(self):
         entries = api.Backend.ldap2.get_entries(
-            DN(('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'),
-               self.suffix),
+            DN(api.env.container_masters, self.suffix),
             api.Backend.ldap2.SCOPE_ONELEVEL, None, ['dn'])
 
         for entry in entries:
@@ -1034,13 +1040,8 @@ class BindInstance(service.Service):
             cname_fqdn[cname] = fqdn
 
         # get FQDNs of all IPA masters
-        ldap = self.api.Backend.ldap2
         try:
-            entries = ldap.get_entries(
-                DN(('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'),
-                   self.api.env.basedn),
-                ldap.SCOPE_ONELEVEL, None, ['cn'])
-            masters = set(e['cn'][0] for e in entries)
+            masters = set(get_masters(self.api.Backend.ldap2))
         except errors.NotFound:
             masters = set()
 
@@ -1062,6 +1063,10 @@ class BindInstance(service.Service):
         self.host = host
         self.fqdn = fqdn
         self.domain = domain_name
+
+        if not dns_zone_exists(zone, api=self.api):
+            # Zone may be a forward zone, skip update
+            return
 
         areclist = get_fwd_rr(zone, host, api=self.api)
         for rdata in areclist:
@@ -1180,12 +1185,18 @@ class BindInstance(service.Service):
             except ValueError as error:
                 logger.debug('%s', error)
 
-        # disabled by default, by ldap_enable()
+        installutils.rmtree(paths.BIND_LDAP_DNS_IPA_WORKDIR)
+
+        # disabled by default, by ldap_configure()
         if enabled:
             self.enable()
+        else:
+            self.disable()
 
         if running:
             self.restart()
+        else:
+            self.stop()
 
         self.named_regular.unmask()
         if named_regular_enabled:

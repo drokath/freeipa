@@ -17,6 +17,8 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+from __future__ import absolute_import
+
 import logging
 import os
 import shutil
@@ -190,6 +192,7 @@ class Backup(admintool.AdminTool):
         paths.IPA_DNSKEYSYNCD_KEYTAB,
         paths.IPA_CUSTODIA_KEYS,
         paths.IPA_CUSTODIA_CONF,
+        paths.GSSPROXY_CONF,
         paths.HOSTS,
     ) + tuple(
         os.path.join(paths.IPA_NSSDB_DIR, file)
@@ -286,9 +289,9 @@ class Backup(admintool.AdminTool):
         os.chown(self.top_dir, pent.pw_uid, pent.pw_gid)
         os.chmod(self.top_dir, 0o750)
         self.dir = os.path.join(self.top_dir, "ipa")
-        os.mkdir(self.dir)
-        os.chmod(self.dir, 0o750)
+        os.mkdir(self.dir, 0o750)
         os.chown(self.dir, pent.pw_uid, pent.pw_gid)
+        self.tarfile = None
 
         self.header = os.path.join(self.top_dir, 'header')
 
@@ -310,7 +313,7 @@ class Backup(admintool.AdminTool):
                     dirsrv.stop(capture_output=False)
             else:
                 logger.info('Stopping IPA services')
-                run(['ipactl', 'stop'])
+                run([paths.IPACTL, 'stop'])
 
             instance = installutils.realm_to_serverid(api.env.realm)
             if os.path.exists(paths.VAR_LIB_SLAPD_INSTANCE_DIR_TEMPLATE %
@@ -325,7 +328,6 @@ class Backup(admintool.AdminTool):
                 auth_backup_path = os.path.join(paths.VAR_LIB_IPA, 'auth_backup')
                 tasks.backup_auth_configuration(auth_backup_path)
                 self.file_backup(options)
-            self.finalize_backup(options.data_only, options.gpg, options.gpg_keyring)
 
             if options.data_only:
                 if not options.online:
@@ -333,7 +335,15 @@ class Backup(admintool.AdminTool):
                     dirsrv.start(capture_output=False)
             else:
                 logger.info('Starting IPA service')
-                run(['ipactl', 'start'])
+                run([paths.IPACTL, 'start'])
+
+            # Compress after services are restarted to minimize
+            # the unavailability window
+            if not options.data_only:
+                self.compress_file_backup()
+
+            self.finalize_backup(options.data_only, options.gpg,
+                                 options.gpg_keyring)
 
         finally:
             try:
@@ -422,11 +432,16 @@ class Backup(admintool.AdminTool):
             try:
                 conn.add_entry(ent)
             except Exception as e:
-                raise admintool.ScriptError('Unable to add LDIF task: %s'
-                    % e)
+                raise admintool.ScriptError(
+                    'Unable to add LDIF task: %s' % e
+                )
 
             logger.info("Waiting for LDIF to finish")
-            wait_for_task(conn, dn)
+            if (wait_for_task(conn, dn) != 0):
+                raise admintool.ScriptError(
+                    'BAK online task failed. Check file systems\' free space.'
+                )
+
         else:
             args = [paths.DB2LDIF,
                     '-Z', instance,
@@ -435,10 +450,25 @@ class Backup(admintool.AdminTool):
                     '-a', ldiffile]
             result = run(args, raiseonerr=False)
             if result.returncode != 0:
-                logger.critical('db2ldif failed: %s', result.error_log)
+                raise admintool.ScriptError(
+                    'db2ldif failed: %s '
+                    'Check if destination directory %s has enough space.'
+                    % (result.error_log, os.path.dirname(ldiffile))
+                )
 
         # Move the LDIF backup to our location
-        shutil.move(ldiffile, os.path.join(self.dir, ldifname))
+        try:
+            shutil.move(ldiffile, os.path.join(self.dir, ldifname))
+        except (IOError, OSError) as e:
+            raise admintool.ScriptError(
+                'Unable to move LDIF: %s '
+                'Check if destination directory %s has enough space.'
+                % (e, os.path.dirname(ldiffile))
+            )
+        except Exception as e:
+            raise admintool.ScriptError(
+                'Unexpected error: %s' % e
+            )
 
 
     def db2bak(self, instance, online=True):
@@ -469,18 +499,37 @@ class Backup(admintool.AdminTool):
             try:
                 conn.add_entry(ent)
             except Exception as e:
-                raise admintool.ScriptError('Unable to to add backup task: %s'
-                    % e)
+                raise admintool.ScriptError(
+                    'Unable to to add backup task: %s' % e
+                )
 
             logger.info("Waiting for BAK to finish")
-            wait_for_task(conn, dn)
+            if (wait_for_task(conn, dn) != 0):
+                raise admintool.ScriptError(
+                    'BAK online task failed. Check file systems\' free space.'
+                )
+
         else:
             args = [paths.DB2BAK, bakdir, '-Z', instance]
             result = run(args, raiseonerr=False)
             if result.returncode != 0:
-                logger.critical('db2bak failed: %s', result.error_log)
-
-        shutil.move(bakdir, self.dir)
+                raise admintool.ScriptError(
+                    'db2bak failed: %s '
+                    'Check if destination directory %s has enough space.'
+                    % (result.error_log, bakdir)
+                )
+        try:
+            shutil.move(bakdir, self.dir)
+        except (IOError, OSError) as e:
+            raise admintool.ScriptError(
+                'Unable to move BAK: %s '
+                'Check if destination directory %s has enough space.'
+                % (e, bakdir)
+            )
+        except Exception as e:
+            raise admintool.ScriptError(
+                'Unexpected error: %s' % e
+            )
 
 
     def file_backup(self, options):
@@ -488,7 +537,7 @@ class Backup(admintool.AdminTool):
         def verify_directories(dirs):
             return [s for s in dirs if os.path.exists(s)]
 
-        tarfile = os.path.join(self.dir, 'files.tar')
+        self.tarfile = os.path.join(self.dir, 'files.tar')
 
         logger.info("Backing up files")
         args = ['tar',
@@ -496,7 +545,7 @@ class Backup(admintool.AdminTool):
                 '--xattrs',
                 '--selinux',
                 '-cf',
-                tarfile
+                self.tarfile
                ]
 
         args.extend(verify_directories(self.dirs))
@@ -522,7 +571,7 @@ class Backup(admintool.AdminTool):
                     '--selinux',
                     '--no-recursion',
                     '-rf',  # -r appends to an existing archive
-                    tarfile,
+                    self.tarfile,
                    ]
             args.extend(missing_directories)
 
@@ -533,17 +582,20 @@ class Backup(admintool.AdminTool):
                     'when adding directory structure: %s' %
                     (result.returncode, result.error_log))
 
+    def compress_file_backup(self):
+
         # Compress the archive. This is done separately, since 'tar' cannot
         # append to a compressed archive.
-        result = run(['gzip', tarfile], raiseonerr=False)
-        if result.returncode != 0:
-            raise admintool.ScriptError(
-                'gzip returned non-zero code %d '
-                'when compressing the backup: %s' %
-                (result.returncode, result.error_log))
+        if self.tarfile:
+            result = run([paths.GZIP, self.tarfile], raiseonerr=False)
+            if result.returncode != 0:
+                raise admintool.ScriptError(
+                    'gzip returned non-zero code %d '
+                    'when compressing the backup: %s' %
+                    (result.returncode, result.error_log))
 
-        # Rename the archive back to files.tar to preserve compatibility
-        os.rename(os.path.join(self.dir, 'files.tar.gz'), tarfile)
+            # Rename the archive back to files.tar to preserve compatibility
+            os.rename(os.path.join(self.dir, 'files.tar.gz'), self.tarfile)
 
 
     def create_header(self, data_only):
@@ -557,12 +609,15 @@ class Backup(admintool.AdminTool):
             config.set('ipa', 'type', 'DATA')
         else:
             config.set('ipa', 'type', 'FULL')
-        config.set('ipa', 'time', time.strftime(ISO8601_DATETIME_FMT, time.gmtime()))
+        config.set(
+            'ipa', 'time', time.strftime(ISO8601_DATETIME_FMT, time.gmtime())
+        )
         config.set('ipa', 'host', api.env.host)
         config.set('ipa', 'ipa_version', str(version.VERSION))
         config.set('ipa', 'version', '1')
 
-        dn = DN(('cn', api.env.host), ('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'), api.env.basedn)
+        dn = DN(('cn', api.env.host), api.env.container_masters,
+                api.env.basedn)
         services_cns = []
         try:
             conn = self.get_connection()
@@ -595,33 +650,52 @@ class Backup(admintool.AdminTool):
         '''
 
         if data_only:
-            backup_dir = os.path.join(paths.IPA_BACKUP_DIR, time.strftime('ipa-data-%Y-%m-%d-%H-%M-%S'))
+            backup_dir = os.path.join(
+                paths.IPA_BACKUP_DIR,
+                time.strftime('ipa-data-%Y-%m-%d-%H-%M-%S')
+            )
             filename = os.path.join(backup_dir, "ipa-data.tar")
         else:
-            backup_dir = os.path.join(paths.IPA_BACKUP_DIR, time.strftime('ipa-full-%Y-%m-%d-%H-%M-%S'))
+            backup_dir = os.path.join(
+                paths.IPA_BACKUP_DIR,
+                time.strftime('ipa-full-%Y-%m-%d-%H-%M-%S')
+            )
             filename = os.path.join(backup_dir, "ipa-full.tar")
 
-        os.mkdir(backup_dir)
-        os.chmod(backup_dir, 0o700)
+        try:
+            os.mkdir(backup_dir, 0o700)
+        except (OSError, IOError) as e:
+            raise admintool.ScriptError(
+                'Could not create backup directory: %s' % e
+            )
+        except Exception as e:
+            raise admintool.ScriptError(
+                'Unexpected error: %s' % e
+            )
 
         os.chdir(self.dir)
-        args = ['tar',
-                '--xattrs',
-                '--selinux',
-                '-czf',
-                filename,
-                '.'
-               ]
+        args = [
+            'tar', '--xattrs', '--selinux', '-czf', filename, '.'
+        ]
         result = run(args, raiseonerr=False)
         if result.returncode != 0:
             raise admintool.ScriptError(
                 'tar returned non-zero code %s: %s' %
-                (result.returncode, result.error_log))
-
+                (result.returncode, result.error_log)
+            )
         if encrypt:
             logger.info('Encrypting %s', filename)
             filename = encrypt_file(filename, keyring)
-
-        shutil.move(self.header, backup_dir)
+        try:
+            shutil.move(self.header, backup_dir)
+        except (IOError, OSError) as e:
+            raise admintool.ScriptError(
+                'Could not create or move data to backup directory %s: %s' %
+                (backup_dir, e)
+            )
+        except Exception as e:
+            raise admintool.ScriptError(
+                'Unexpected error: %s' % e
+            )
 
         logger.info('Backed up to %s', backup_dir)

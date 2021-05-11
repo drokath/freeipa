@@ -20,13 +20,15 @@
 # FIXME: Pylint errors
 # pylint: disable=no-member
 
+from __future__ import absolute_import
+
 import os
 import re
 
 import nose
 from ipaplatform.paths import paths
 
-from ipatests.pytest_plugins.integration import tasks
+from ipatests.pytest_ipa.integration import tasks
 
 # importing test_trust under different name to avoid nose executing the test
 # base class imported from this module
@@ -496,8 +498,8 @@ class BaseTestLegacyNssLdapRedHat(object):
 # Base classes that join legacy client specific steps with steps required
 # to setup IPA with trust (both with and without using the POSIX attributes)
 
-class BaseTestLegacyClientPosix(BaseTestLegacyClient,
-                                trust_tests.TestEnforcedPosixADTrust):
+class BaseTestLegacyClientPosix(trust_tests.BaseTestTrust,
+                                BaseTestLegacyClient):
 
     testuser_uid_regex = '10042'
     testuser_gid_regex = '10047'
@@ -511,8 +513,8 @@ class BaseTestLegacyClientPosix(BaseTestLegacyClient,
         pass
 
 
-class BaseTestLegacyClientNonPosix(BaseTestLegacyClient,
-                                   trust_tests.TestBasicADTrust):
+class BaseTestLegacyClientNonPosix(trust_tests.BaseTestTrust,
+                                   BaseTestLegacyClient):
 
     testuser_uid_regex = '(?!10042)(\d+)'
     testuser_gid_regex = '(?!10047)(\d+)'

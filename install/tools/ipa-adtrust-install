@@ -32,7 +32,7 @@ import six
 from optparse import SUPPRESS_HELP  # pylint: disable=deprecated-module
 
 from ipalib.install import sysrestore
-from ipaserver.install import adtrust
+from ipaserver.install import adtrust, service
 from ipaserver.install.installutils import (
     read_password,
     check_server_configuration,
@@ -110,7 +110,7 @@ def read_admin_password(admin_name):
 
 def ensure_admin_kinit(admin_name, admin_password):
     try:
-        ipautil.run(['kinit', admin_name], stdin=admin_password+'\n')
+        ipautil.run([paths.KINIT, admin_name], stdin=admin_password+'\n')
     except ipautil.CalledProcessError:
         print("There was error to automatically re-kinit your admin user "
               "ticket.")
@@ -211,6 +211,10 @@ def main():
 
     adtrust.install_check(True, options, api)
     adtrust.install(True, options, fstore, api)
+
+    # Enable configured services and update DNS SRV records
+    service.sync_services_state(api.env.host)
+    api.Command.dns_update_system_records()
 
     print("""
 =============================================================================

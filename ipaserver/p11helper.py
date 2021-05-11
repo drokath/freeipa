@@ -467,16 +467,11 @@ p11_kit_uri_free = _libp11_kit.p11_kit_uri_free
 def loadLibrary(module):
     """Load the PKCS#11 library"""
     # Load PKCS #11 library
-    try:
-        if module:
-            # pylint: disable=no-member
-            pDynLib = _ffi.dlopen(module, _ffi.RTLD_NOW | _ffi.RTLD_LOCAL)
-        else:
-            raise Exception()
-
-    except Exception:
-        # Failed to load the PKCS #11 library
-        raise
+    if module:
+        # pylint: disable=no-member
+        pDynLib = _ffi.dlopen(module, _ffi.RTLD_NOW | _ffi.RTLD_LOCAL)
+    else:
+        raise Exception()
 
     # Retrieve the entry point for C_GetFunctionList
     pGetFunctionList = pDynLib.C_GetFunctionList
@@ -526,23 +521,20 @@ CONST_RSA_PKCS_OAEP_PARAMS_ptr = new_ptr(CK_RSA_PKCS_OAEP_PARAMS, dict(
 #
 class P11HelperException(Exception):
     """parent class for all exceptions"""
-    pass
+
 P11HelperException.__name__ = 'Exception'
 
 
 class Error(P11HelperException):
     """general error"""
-    pass
 
 
 class NotFound(P11HelperException):
     """key not found"""
-    pass
 
 
 class DuplicationError(P11HelperException):
     """key already exists"""
-    pass
 
 
 ########################################################################
@@ -929,6 +921,7 @@ class P11_Helper(object):
             if self.token_label == char_array_to_unicode(
                     token_info_ptr[0].label, 32).rstrip():
                 return slot
+        return None
 
     def finalize(self):
         """

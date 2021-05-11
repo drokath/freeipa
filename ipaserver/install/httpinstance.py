@@ -17,20 +17,21 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-from __future__ import print_function
+from __future__ import print_function, absolute_import
 
 import logging
 import os
-import os.path
 import pwd
 import re
-import dbus
+import glob
+import errno
 import shlex
 import pipes
 import locale
 
 import six
 from augeas import Augeas
+import dbus
 
 from ipalib.install import certmonger
 from ipapython import ipaldap
@@ -45,7 +46,7 @@ from ipapython import ipautil
 from ipapython.dn import DN
 import ipapython.errors
 from ipaserver.install import sysupgrade
-from ipalib import api
+from ipalib import api, x509
 from ipalib.constants import IPAAPI_USER
 from ipaplatform.constants import constants
 from ipaplatform.tasks import tasks
@@ -147,6 +148,7 @@ class HTTPInstance(service.Service):
             DOMAIN=self.domain,
             AUTOREDIR='' if auto_redirect else '#',
             CRL_PUBLISH_PATH=paths.PKI_CA_PUBLISH_DIR,
+            WSGI_PROCESSES=constants.WSGI_PROCESSES,
         )
         self.ca_file = ca_file
         if ca_is_configured is not None:
@@ -158,7 +160,7 @@ class HTTPInstance(service.Service):
         self.step("setting mod_nss port to 443", self.__set_mod_nss_port)
         self.step("setting mod_nss cipher suite",
                   self.set_mod_nss_cipher_suite)
-        self.step("setting mod_nss protocol list to TLSv1.0 - TLSv1.2",
+        self.step("setting mod_nss protocol list to TLSv1.2",
                   self.set_mod_nss_protocol)
         self.step("setting mod_nss password file", self.__set_mod_nss_passwordfile)
         self.step("enabling mod_nss renegotiate", self.enable_mod_nss_renegotiate)
@@ -194,7 +196,7 @@ class HTTPInstance(service.Service):
         # We do not let the system start IPA components on its own,
         # Instead we reply on the IPA init script to start only enabled
         # components as found in our LDAP configuration tree
-        self.ldap_enable('HTTP', self.fqdn, None, self.suffix)
+        self.ldap_configure('HTTP', self.fqdn, None, self.suffix)
 
     def configure_selinux_for_httpd(self):
         try:
@@ -213,6 +215,10 @@ class HTTPInstance(service.Service):
 
     def __configure_http(self):
         self.update_httpd_service_ipa_conf()
+        self.update_httpd_wsgi_conf()
+
+        # Must be world-readable / executable
+        os.chmod(paths.HTTPD_ALIAS_DIR, 0o755)
 
         target_fname = paths.HTTPD_IPA_CONF
         http_txt = ipautil.template_file(
@@ -268,7 +274,7 @@ class HTTPInstance(service.Service):
         return nickname
 
     def set_mod_nss_protocol(self):
-        installutils.set_directive(paths.HTTPD_NSS_CONF, 'NSSProtocol', 'TLSv1.0,TLSv1.1,TLSv1.2', False)
+        installutils.set_directive(paths.HTTPD_NSS_CONF, 'NSSProtocol', 'TLSv1.2', False)
 
     def enable_mod_nss_renegotiate(self):
         installutils.set_directive(paths.HTTPD_NSS_CONF, 'NSSRenegotiation', 'on', False)
@@ -444,7 +450,10 @@ class HTTPInstance(service.Service):
                     ca='IPA',
                     profile=dogtag.DEFAULT_PROFILE,
                     dns=[self.fqdn],
-                    post_command='restart_httpd')
+                    post_command='restart_httpd',
+                    storage='NSSDB',
+                    resubmit_timeout=api.env.replication_wait_timeout
+                )
             finally:
                 if prev_helper is not None:
                     certmonger.modify_ca_helper('IPA', prev_helper)
@@ -468,9 +477,14 @@ class HTTPInstance(service.Service):
         self.import_ca_certs(db, self.ca_is_configured)
 
     def __publish_ca_cert(self):
-        ca_db = certs.CertDB(self.realm, nssdir=paths.HTTPD_ALIAS_DIR,
-                             subject_base=self.subject_base)
-        ca_db.export_pem_cert(self.cacert_nickname, paths.CA_CRT)
+        ca_subject = self.cert.issuer
+        certlist = x509.load_certificate_list_from_file(paths.IPA_CA_CRT)
+        ca_certs = [c for c in certlist if c.subject == ca_subject]
+        if not ca_certs:
+            raise RuntimeError("HTTPD cert was issued by an unknown CA.")
+        # at this time we can assume any CA cert will be valid since this is
+        # only run during installation
+        x509.write_certificate_list(certlist, paths.CA_CRT, mode=0o644)
 
     def is_kdcproxy_configured(self):
         """Check if KDC proxy has already been configured in the past"""
@@ -507,6 +521,9 @@ class HTTPInstance(service.Service):
 
     def update_httpd_service_ipa_conf(self):
         tasks.configure_httpd_service_ipa_conf()
+
+    def update_httpd_wsgi_conf(self):
+        tasks.configure_httpd_wsgi_conf()
 
     def uninstall(self):
         if self.is_configured():
@@ -555,16 +572,37 @@ class HTTPInstance(service.Service):
             except ValueError as error:
                 logger.debug("%s", error)
 
-        installutils.remove_keytab(self.keytab)
-        installutils.remove_file(paths.HTTP_CCACHE)
-
         # Remove the configuration files we create
-        installutils.remove_file(paths.HTTPD_IPA_REWRITE_CONF)
-        installutils.remove_file(paths.HTTPD_IPA_CONF)
-        installutils.remove_file(paths.HTTPD_IPA_PKI_PROXY_CONF)
-        installutils.remove_file(paths.HTTPD_IPA_KDCPROXY_CONF_SYMLINK)
-        installutils.remove_file(paths.HTTPD_IPA_KDCPROXY_CONF)
-        tasks.remove_httpd_service_ipa_conf()
+        installutils.remove_keytab(self.keytab)
+        remove_files = [
+            paths.HTTP_CCACHE,
+            paths.HTTPD_IPA_REWRITE_CONF,
+            paths.HTTPD_IPA_CONF,
+            paths.HTTPD_IPA_PKI_PROXY_CONF,
+            paths.HTTPD_IPA_KDCPROXY_CONF_SYMLINK,
+            paths.HTTPD_IPA_KDCPROXY_CONF,
+            paths.GSSPROXY_CONF,
+            paths.HTTPD_PASSWORD_CONF,
+            paths.SYSTEMD_SYSTEM_HTTPD_IPA_CONF,
+        ]
+        # NSS DB backups
+        remove_files.extend(
+            glob.glob(os.path.join(paths.HTTPD_ALIAS_DIR, '*.ipasave'))
+        )
+        if paths.HTTPD_IPA_WSGI_MODULES_CONF is not None:
+            remove_files.append(paths.HTTPD_IPA_WSGI_MODULES_CONF)
+
+        for filename in remove_files:
+            installutils.remove_file(filename)
+
+        try:
+            os.rmdir(paths.SYSTEMD_SYSTEM_HTTPD_D_DIR)
+        except OSError as e:
+            if e.errno not in {errno.ENOENT, errno.ENOTEMPTY}:
+                logger.error(
+                    "Failed to remove directory %s",
+                    paths.SYSTEMD_SYSTEM_HTTPD_D_DIR
+                )
 
         # Restore SELinux boolean states
         boolean_states = {name: self.restore_state(name)
@@ -577,7 +615,7 @@ class HTTPInstance(service.Service):
         if running:
             self.restart()
 
-        # disabled by default, by ldap_enable()
+        # disabled by default, by ldap_configure()
         if enabled:
             self.enable()
 
@@ -612,4 +650,8 @@ class HTTPInstance(service.Service):
                 else:
                     remote_ldap.simple_bind(ipaldap.DIRMAN_DN,
                                             self.dm_password)
-                replication.wait_for_entry(remote_ldap, service_dn, timeout=60)
+                replication.wait_for_entry(
+                    remote_ldap,
+                    service_dn,
+                    timeout=api.env.replication_wait_timeout
+                )

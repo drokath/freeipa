@@ -159,12 +159,30 @@ return {
                     },
                     'idnssoarname',
                     'idnssoaserial',
-                    'idnssoarefresh',
-                    'idnssoaretry',
-                    'idnssoaexpire',
-                    'idnssoaminimum',
-                    'dnsdefaultttl',
-                    'dnsttl',
+                    {
+                        name: 'idnssoarefresh',
+                        measurement_unit: 'seconds'
+                    },
+                    {
+                        name: 'idnssoaretry',
+                        measurement_unit: 'seconds'
+                    },
+                    {
+                        name: 'idnssoaexpire',
+                        measurement_unit: 'seconds'
+                    },
+                    {
+                        name: 'idnssoaminimum',
+                        measurement_unit: 'seconds'
+                    },
+                    {
+                        name: 'dnsdefaultttl',
+                        measurement_unit: 'seconds'
+                    },
+                    {
+                        name: 'dnsttl',
+                        measurement_unit: 'seconds'
+                    },
                     {
                         $type: 'radio',
                         name: 'idnsallowdynupdate',
@@ -1323,6 +1341,12 @@ return {
                     name: 'idnsname',
                     other_entity: 'host',
                     widget: 'identity.idnsname'
+                },
+                {
+                    $type: 'text',
+                    name: 'dnsttl',
+                    measurement_unit: 'seconds',
+                    widget: 'record_settings.dnsttl'
                 }
             ],
             widgets:[
@@ -1338,6 +1362,18 @@ return {
                             label: '@mo-param:dnsrecord:idnsname:label'
                         }
                    ]
+                },
+                {
+                    name: 'record_settings',
+                    label: '@i18n:details.record',
+                    $type: 'details_section',
+                    widgets: [
+                        {
+                            $type: 'text',
+                            name: 'dnsttl',
+                            label: '@mo-param:dnsrecord:dnsttl:label'
+                        }
+                    ]
                 }
             ]
         }
@@ -1414,6 +1450,12 @@ IPA.dns.record_details_facet = function(spec) {
     that.create_refresh_command = function() {
 
         var command = that.details_facet_create_refresh_command();
+        command.set_option('structured', true);
+        return command;
+    };
+
+    that.create_update_command = function () {
+        var command = that.details_facet_create_update_command();
         command.set_option('structured', true);
         return command;
     };

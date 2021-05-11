@@ -6,6 +6,8 @@
 KRA installer module
 """
 
+from __future__ import absolute_import
+
 import os
 import shutil
 
@@ -16,8 +18,7 @@ from ipaplatform.paths import paths
 from ipapython import certdb
 from ipapython import ipautil
 from ipapython.install.core import group
-from ipaserver.install import custodiainstance
-from ipaserver.install import cainstance
+from ipaserver.install import ca, cainstance
 from ipaserver.install import krainstance
 from ipaserver.install import dsinstance
 from ipaserver.install import service as _service
@@ -68,7 +69,7 @@ def install_check(api, replica_config, options):
                                    "new replica file.")
 
 
-def install(api, replica_config, options):
+def install(api, replica_config, options, custodia):
     if replica_config is None:
         if not options.setup_kra:
             return
@@ -91,11 +92,7 @@ def install(api, replica_config, options):
                     'host/{env.host}@{env.realm}'.format(env=api.env),
                     paths.KRB5_KEYTAB,
                     ccache)
-                custodia = custodiainstance.CustodiaInstance(
-                    replica_config.host_name,
-                    replica_config.realm_name)
                 custodia.get_kra_keys(
-                    replica_config.kra_host_name,
                     krafile,
                     replica_config.dirman_password)
         else:
@@ -115,9 +112,12 @@ def install(api, replica_config, options):
         master_host = replica_config.kra_host_name
         promote = options.promote
 
+    ca_subject = ca.lookup_ca_subject(api, subject_base)
+
     kra = krainstance.KRAInstance(realm_name)
     kra.configure_instance(realm_name, host_name, dm_password, dm_password,
                            subject_base=subject_base,
+                           ca_subject=ca_subject,
                            pkcs12_info=pkcs12_info,
                            master_host=master_host,
                            promote=promote)
@@ -129,6 +129,11 @@ def install(api, replica_config, options):
 
     # Restart apache for new proxy config file
     services.knownservices.httpd.restart(capture_output=True)
+    # Restarted named-pkcs11 to restore bind-dyndb-ldap operation, see
+    # https://pagure.io/freeipa/issue/5813
+    named = services.knownservices.named  # alias for named-pkcs11
+    if named.is_running():
+        named.restart(capture_output=True)
 
 
 def uninstall():

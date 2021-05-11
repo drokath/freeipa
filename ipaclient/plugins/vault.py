@@ -661,9 +661,8 @@ class ModVaultData(Local):
 
         name = self.name + '_internal'
         try:
+            # ipalib.errors.NotFound exception can be propagated
             return self.api.Command[name](*args, **options)
-        except errors.NotFound:
-            raise
         except (errors.InternalError,
                 errors.ExecutionError,
                 errors.GenericError):
@@ -1135,7 +1134,7 @@ class vault_retrieve(ModVaultData):
                 error=_('Invalid vault type'))
 
         if output_file:
-            with open(output_file, 'w') as f:
+            with open(output_file, 'wb') as f:
                 f.write(data)
 
         else:

@@ -59,9 +59,10 @@ def _domain_name_normalizer(d):
 
 def _domain_name_validator(ugettext, value):
     try:
-        validate_domain_name(value, allow_slash=False)
+        validate_domain_name(value, allow_slash=False, check_sld=True)
     except ValueError as e:
         return unicode(e)
+    return None
 
 
 @register()

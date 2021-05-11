@@ -23,6 +23,8 @@
 """
 WSGI appliction for IPA server.
 """
+from __future__ import absolute_import
+
 import logging
 import os
 import sys
@@ -58,3 +60,4 @@ else:
         else:
             logger.error("IPA does not work with the threaded MPM, "
                          "use the pre-fork MPM")
+            raise RuntimeError('threaded MPM detected')

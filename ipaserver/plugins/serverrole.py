@@ -5,7 +5,7 @@
 from ipalib.crud import Retrieve, Search
 from ipalib.errors import NotFound
 from ipalib.frontend import Object
-from ipalib.parameters import Int, Str, StrEnum
+from ipalib.parameters import Flag, Int, Str, StrEnum
 from ipalib.plugable import Registry
 from ipalib import _, ngettext
 
@@ -15,16 +15,21 @@ IPA server roles
 """) + _("""
 Get status of roles (DNS server, CA, etc.) provided by IPA masters.
 """) + _("""
+The status of a role is either enabled, configured, or absent.
+""") + _("""
 EXAMPLES:
 """) + _("""
   Show status of 'DNS server' role on a server:
     ipa server-role-show ipa.example.com "DNS server"
 """) + _("""
   Show status of all roles containing 'AD' on a server:
-    ipa server-role-find --server ipa.example.com --role='AD'
+    ipa server-role-find --server ipa.example.com --role="AD trust controller"
 """) + _("""
   Show status of all configured roles on a server:
     ipa server-role-find ipa.example.com
+""") + _("""
+  Show implicit IPA master role:
+    ipa server-role-find --include-master
 """)
 
 
@@ -65,7 +70,7 @@ class server_role(Object):
             cli_name='status',
             label=_('Role status'),
             doc=_('Status of the role'),
-            values=(u'enabled', u'configured', u'absent'),
+            values=(u'enabled', u'configured', u'hidden', u'absent'),
             default=u'enabled',
             flags={'virtual_attribute', 'no_create', 'no_update'}
         )
@@ -129,6 +134,10 @@ class server_role_find(Search):
             minvalue=0,
             autofill=False,
         ),
+        Flag(
+            'include_master',
+            doc=_('Include IPA master entries'),
+        )
     )
 
     def execute(self, *keys, **options):
@@ -151,8 +160,16 @@ class server_role_find(Search):
             role_servrole=role_name,
             status=status)
 
-        result = [
-            r for r in role_status if r[u'role_servrole'] != "IPA master"]
+        # Don't display "IPA master" information unless the role is
+        # requested explicitly. All servers are considered IPA masters,
+        # except for replicas during installation.
+        if options.get('include_master') or role_name == "IPA master":
+            result = role_status
+        else:
+            result = [
+                r for r in role_status
+                if r[u'role_servrole'] != "IPA master"
+            ]
         return dict(
             result=result,
             count=len(result),
@@ -174,5 +191,5 @@ class servrole(Object):
             label=_("Role name"),
             doc=_("IPA role name"),
             flags=(u'virtual_attribute',)
-        )
+        ),
     )

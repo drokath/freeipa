@@ -17,6 +17,8 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+from __future__ import absolute_import
+
 import logging
 import os
 import shutil
@@ -39,6 +41,7 @@ from ipaserver.install.replication import (wait_for_task, ReplicationManager,
                                            get_cs_replication_manager)
 from ipaserver.install import installutils
 from ipaserver.install import dsinstance, httpinstance, cainstance, krbinstance
+from ipaserver.masters import get_masters
 from ipapython import ipaldap
 import ipapython.errors
 from ipaplatform.constants import constants
@@ -206,6 +209,10 @@ class Restore(admintool.AdminTool):
         options = self.options
         super(Restore, self).ask_for_options()
 
+        # no IPA config means we are reinstalling from nothing so
+        # there is no need for the DM password
+        if not os.path.exists(paths.IPA_DEFAULT_CONF):
+            return
         # get the directory manager password
         self.dirman_password = options.password
         if not options.password:
@@ -379,7 +386,7 @@ class Restore(admintool.AdminTool):
                     dirsrv.start(capture_output=False)
             else:
                 logger.info('Stopping IPA services')
-                result = run(['ipactl', 'stop'], raiseonerr=False)
+                result = run([paths.IPACTL, 'stop'], raiseonerr=False)
                 if result.returncode not in [0, 6]:
                     logger.warning('Stopping IPA failed: %s', result.error_log)
 
@@ -419,10 +426,16 @@ class Restore(admintool.AdminTool):
                 gssproxy = services.service('gssproxy', api)
                 gssproxy.reload_or_restart()
                 logger.info('Starting IPA services')
-                run(['ipactl', 'start'])
+                run([paths.IPACTL, 'start'])
                 logger.info('Restarting SSSD')
                 sssd = services.service('sssd', api)
                 sssd.restart()
+                logger.info('Restarting oddjobd')
+                oddjobd = services.service('oddjobd', api)
+                if not oddjobd.is_enabled():
+                    logger.info("Enabling oddjobd")
+                    oddjobd.enable()
+                oddjobd.start()
                 http.remove_httpd_ccaches()
                 # have the daemons pick up their restored configs
                 run([paths.SYSTEMCTL, "--system", "daemon-reload"])
@@ -473,16 +486,7 @@ class Restore(admintool.AdminTool):
             logger.error('Unable to get connection, skipping disabling '
                          'agreements: %s', e)
             return
-        masters = []
-        dn = DN(('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'), api.env.basedn)
-        try:
-            entries = conn.get_entries(dn, conn.SCOPE_ONELEVEL)
-        except Exception as e:
-            raise admintool.ScriptError(
-                "Failed to read master data: %s" % e)
-        else:
-            masters = [ent.single_value['cn'] for ent in entries]
-
+        masters = get_masters(conn)
         for master in masters:
             if master == api.env.host:
                 continue
@@ -495,7 +499,8 @@ class Restore(admintool.AdminTool):
                                 master, e)
                 continue
 
-            master_dn = DN(('cn', master), ('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'), api.env.basedn)
+            master_dn = DN(('cn', master), api.env.container_masters,
+                           api.env.basedn)
             try:
                 services = repl.conn.get_entries(master_dn,
                                                  repl.conn.SCOPE_ONELEVEL)
@@ -587,10 +592,14 @@ class Restore(admintool.AdminTool):
             logger.info("Waiting for LDIF to finish")
             wait_for_task(conn, dn)
         else:
+            template_dir = paths.VAR_LOG_DIRSRV_INSTANCE_TEMPLATE % instance
             try:
-                os.makedirs(paths.VAR_LOG_DIRSRV_INSTANCE_TEMPLATE % instance)
+                os.makedirs(template_dir)
             except OSError as e:
                 pass
+
+            os.chown(template_dir, pent.pw_uid, pent.pw_gid)
+            os.chmod(template_dir, 0o770)
 
             args = [paths.LDIF2DB,
                     '-Z', instance,
@@ -660,7 +669,7 @@ class Restore(admintool.AdminTool):
         '''
         Restore paths.IPA_DEFAULT_CONF to temporary directory.
 
-        Primary purpose of this method is to get cofiguration for api
+        Primary purpose of this method is to get configuration for api
         finalization when restoring ipa after uninstall.
         '''
         cwd = os.getcwd()
@@ -874,3 +883,18 @@ class Restore(admintool.AdminTool):
 
         self.instances = [installutils.realm_to_serverid(api.env.realm)]
         self.backends = ['userRoot', 'ipaca']
+
+        # no IPA config means we are reinstalling from nothing so
+        # there is nothing to test the DM password against.
+        if os.path.exists(paths.IPA_DEFAULT_CONF):
+            instance_name = installutils.realm_to_serverid(api.env.realm)
+            if not services.knownservices.dirsrv.is_running(instance_name):
+                raise admintool.ScriptError(
+                    "directory server instance is not running"
+                )
+            try:
+                ReplicationManager(api.env.realm, api.env.host,
+                                   self.dirman_password)
+            except errors.ACIError:
+                logger.error("Incorrect Directory Manager password provided")
+                raise

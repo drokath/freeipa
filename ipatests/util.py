@@ -21,6 +21,8 @@
 Common utility functions and classes for unit tests.
 """
 
+from __future__ import absolute_import
+
 import inspect
 import os
 from os import path
@@ -42,6 +44,7 @@ from ipalib import api
 from ipalib.plugable import Plugin
 from ipalib.request import context
 from ipapython.dn import DN
+from ipapython.ipaldap import ldap_initialize
 from ipapython.ipautil import run
 
 
@@ -68,7 +71,8 @@ PYTEST_VERSION = tuple(int(v) for v in pytest.__version__.split('.'))
 def check_ipaclient_unittests(reason="Skip in ipaclient unittest mode"):
     """Call this in a package to skip the package in ipaclient-unittest mode
     """
-    if pytest.config.getoption('ipaclient_unittests', False):
+    config = pytest.config  # pylint: disable=no-member
+    if config.getoption('ipaclient_unittests', False):
         if PYTEST_VERSION[0] >= 3:
             # pytest 3+ does no longer allow pytest.skip() on module level
             # pylint: disable=unexpected-keyword-arg
@@ -81,7 +85,8 @@ def check_ipaclient_unittests(reason="Skip in ipaclient unittest mode"):
 def check_no_ipaapi(reason="Skip tests that needs an IPA API"):
     """Call this in a package to skip the package in no-ipaapi mode
     """
-    if pytest.config.getoption('skip_ipaapi', False):
+    config = pytest.config  # pylint: disable=no-member
+    if config.getoption('skip_ipaapi', False):
         if PYTEST_VERSION[0] >= 3:
             # pylint: disable=unexpected-keyword-arg
             raise pytest.skip.Exception(reason, allow_module_level=True)
@@ -184,8 +189,8 @@ class Fuzzy(object):
     """
     Perform a fuzzy (non-strict) equality tests.
 
-    `Fuzzy` instances will likely be used when comparing nesting data-structures
-    using `assert_deepequal()`.
+    `Fuzzy` instances will likely be used when comparing nesting
+    data-structures using `assert_deepequal()`.
 
     By default a `Fuzzy` instance is equal to everything.  For example, all of
     these evaluate to ``True``:
@@ -363,7 +368,8 @@ def assert_deepequal(expected, got, doc='', stack=tuple()):
     >>> got = [u'Hello', dict(world=1.0)]
     >>> expected == got
     True
-    >>> assert_deepequal(expected, got, doc='Testing my nested data')  # doctest:+ELLIPSIS
+    >>> assert_deepequal(
+    ...    expected, got, doc='Testing my nested data')  # doctest: +ELLIPSIS
     Traceback (most recent call last):
       ...
     AssertionError: assert_deepequal: type(expected) is not type(got).
@@ -396,7 +402,11 @@ def assert_deepequal(expected, got, doc='', stack=tuple()):
     if isinstance(expected, DN):
         if isinstance(got, six.string_types):
             got = DN(got)
-    if not (isinstance(expected, Fuzzy) or callable(expected) or type(expected) is type(got)):
+    if (
+        not (isinstance(expected, Fuzzy)
+             or callable(expected)
+             or type(expected) is type(got))
+    ):
         raise AssertionError(
             TYPE % (doc, type(expected), type(got), expected, got, stack)
         )
@@ -686,22 +696,30 @@ class DummyClass(object):
     def __process(self, name_, args_, kw_):
         if self.__i >= len(self.__calls):
             raise AssertionError(
-                'extra call: %s, %r, %r' % (name_, args_, kw_)
+                "extra call: {name!s}, {args!r}, {kwargs!r}".format(
+                    name=name_, args=args_, kwargs=kw_
+                )
             )
         (name, args, kw, result) = self.__calls[self.__i]
         self.__i += 1
         i = self.__i
         if name_ != name:
             raise AssertionError(
-                'call %d should be to method %r; got %r' % (i, name, name_)
+                "call {0:d} should be to method {1!r}; got {2!r}".format(
+                    i, name, name_
+                )
             )
         if args_ != args:
             raise AssertionError(
-                'call %d to %r should have args %r; got %r' % (i, name, args, args_)
+                "call {0:d} to {1!r} should have args {2!r}; got {3!r}".format(
+                    i, name, args, args_
+                )
             )
         if kw_ != kw:
             raise AssertionError(
-                'call %d to %r should have kw %r, got %r' % (i, name, kw, kw_)
+                "call {0:d} to {1!r} should have kw {2!r}, got {3!r}".format(
+                    i, name, kw, kw_
+                )
             )
         if isinstance(result, Exception):
             raise result
@@ -713,7 +731,7 @@ class DummyClass(object):
 
 class MockLDAP(object):
     def __init__(self):
-        self.connection = ldap.initialize(
+        self.connection = ldap_initialize(
             'ldap://{host}'.format(host=ipalib.api.env.host)
         )
 
@@ -799,7 +817,6 @@ def change_principal(principal, password=None, client=None, path=None,
     if client is None:
         client = api
 
-
     client.Backend.rpcclient.disconnect()
 
     try:
@@ -863,5 +880,31 @@ def host_keytab(hostname, options=None):
 def get_group_dn(cn):
     return DN(('cn', cn), api.env.container_group, api.env.basedn)
 
+
 def get_user_dn(uid):
     return DN(('uid', uid), api.env.container_user, api.env.basedn)
+
+
+@contextmanager
+def xfail_context(condition, reason):
+    """Expect a block of code to fail.
+
+    This function provides functionality similar to pytest.mark.xfail
+    but for a block of code instead of the whole test function. This has
+    two benefits:
+    1) you can mark single line as expectedly failing without suppressing
+       all other errors in the test function
+    2) you can use conditions which can not be evaluated before the test start.
+
+    The check is always done in "strict" mode, i.e. if test is expected to
+    fail but succeeds then it will be marked as failing.
+    """
+    try:
+        yield
+    except Exception:
+        if condition:
+            pytest.xfail(reason)
+        raise
+    else:
+        if condition:
+            pytest.fail('XPASS(strict) reason: {}'.format(reason), False)

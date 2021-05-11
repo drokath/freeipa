@@ -1,3 +1,11 @@
+# 389-ds-base 1.4 no longer supports i686 platform, build only client
+# packages, https://bugzilla.redhat.com/show_bug.cgi?id=1544386
+%if 0%{?fedora} >= 28 || 0%{?rhel} > 7
+%ifarch %{ix86}
+%{!?ONLY_CLIENT:%global ONLY_CLIENT 1}
+%endif
+%endif
+
 # Define ONLY_CLIENT to only make the ipa-client and ipa-python
 # subpackages
 %{!?ONLY_CLIENT:%global ONLY_CLIENT 0}
@@ -41,8 +49,8 @@
 
 %global alt_name ipa
 %if 0%{?rhel}
-# 1.15.1-7: certauth (http://krbdev.mit.edu/rt/Ticket/Display.html?id=8561)
-%global krb5_version 1.15.1-4
+# 1.15.1-36: https://bugzilla.redhat.com/show_bug.cgi?id=1755223
+%global krb5_version 1.15.1-36
 # 0.7.16: https://github.com/drkjam/netaddr/issues/71
 %global python_netaddr_version 0.7.5-8
 # Require 4.7.0 which brings Python 3 bindings
@@ -50,6 +58,11 @@
 %global selinux_policy_version 3.12.1-153
 %global slapi_nis_version 0.56.0-4
 %global python2_ldap_version 2.4.15
+# 10.5.9-5: https://bugzilla.redhat.com/show_bug.cgi?id=1596629
+%global pki_version 10.5.9-5
+# Fix for "Installation fails: Replica Busy"
+# https://bugzilla.redhat.com/show_bug.cgi?id=1598478
+%global ds_version 1.3.8.4-15
 %else
 # 1.15.1-7: certauth (http://krbdev.mit.edu/rt/Ticket/Display.html?id=8561)
 %global krb5_version 1.15.1-7
@@ -57,19 +70,19 @@
 %global python_netaddr_version 0.7.16
 # Require 4.7.0 which brings Python 3 bindings
 %global samba_version 2:4.7.0
-%global selinux_policy_version 3.13.1-158.4
+# DNSSEC AVC violation, RHBZ#1537971
+%global selinux_policy_version 3.13.1-283.24
 %global slapi_nis_version 0.56.1
 
-# Use python3-pyldap to be compatible with old python3-pyldap 2.x and new
-# python3-ldap 3.0. The python3-ldap package also provides python3-pyldap.
-%if 0%{?fedora} >= 28
-# https://pagure.io/freeipa/issue/7257 DNSSEC daemons on Python 3
-%global python2_ldap_version 3.0.0-0.4.b4
-%global python3_ldap_version 3.0.0-0.4.b4
-%else
-%global python2_ldap_version 2.4.15
-%global python3_ldap_version 2.4.35.1-2
-%endif
+# syncrepl fix, https://pagure.io/freeipa/issue/7240
+%global python2_ldap_version 2.4.25-9
+# fix for segfault in python-ldap, https://pagure.io/freeipa/issue/7324
+%global python3_ldap_version 2.4.37-4
+# 10.5.12: https://pagure.io/dogtagpki/issue/3043
+%global pki_version 10.5.12
+# Fix for "Installation fails: Replica Busy"
+# https://pagure.io/389-ds-base/issue/49818
+%global ds_version 1.3.8.8
 
 %endif
 
@@ -139,7 +152,7 @@ BuildRequires:  libini_config-devel
 BuildRequires:  cyrus-sasl-devel
 %if ! %{ONLY_CLIENT}
 # 1.3.3.9: DS_Sleep (https://fedorahosted.org/389/ticket/48005)
-BuildRequires:  389-ds-base-devel >= 1.3.3.9
+BuildRequires:  389-ds-base-devel >= %{ds_version}
 BuildRequires:  svrcore-devel
 %if 0%{?rhel}
 BuildRequires:  samba-devel >= 4.0.0
@@ -214,7 +227,7 @@ BuildRequires:  python2-dns >= 1.15
 BuildRequires:  jsl
 BuildRequires:  python2-yubico
 # pki Python package
-BuildRequires:  pki-base-python2 >= 10.5.1-2
+BuildRequires:  pki-base-python2 >= %{pki_version}
 BuildRequires:  python2-pytest-multihost
 BuildRequires:  python2-pytest-sourceorder
 # 0.4.2: Py3 fix https://bugzilla.redhat.com/show_bug.cgi?id=1476150
@@ -256,7 +269,7 @@ BuildRequires:  python3-qrcode-core >= 5.0.0
 BuildRequires:  python3-dns >= 1.15
 BuildRequires:  python3-yubico
 # pki Python package
-BuildRequires:  pki-base-python3 >= 10.5.1-2
+BuildRequires:  pki-base-python3 >= %{pki_version}
 BuildRequires:  python3-pytest-multihost
 BuildRequires:  python3-pytest-sourceorder
 # 0.4.2: Py3 fix https://bugzilla.redhat.com/show_bug.cgi?id=1476150
@@ -280,6 +293,7 @@ BuildRequires:  python3-netaddr
 BuildRequires:  python3-pyasn1
 BuildRequires:  python3-pyasn1-modules
 BuildRequires:  python3-pyldap >= %{python3_ldap_version}
+BuildConflicts: python3-ldap < 3.1.0
 %endif # with_python3
 %endif # with_lint
 
@@ -311,12 +325,15 @@ Requires: %{name}-common = %{version}-%{release}
 %if 0%{?with_python3}
 Requires: python3-ipaserver = %{version}-%{release}
 Requires: python3-pyldap >= %{python3_ldap_version}
+Conflicts: python3-ldap < 3.1.0
 %else
 Requires: python2-ipaserver = %{version}-%{release}
 Requires: python2-ldap >= %{python2_ldap_version}
 %endif
-# 1.3.7.6-1: https://bugzilla.redhat.com/show_bug.cgi?id=1488295
-Requires: 389-ds-base >= 1.3.7.6-1
+# 1.3.7.9-1: https://bugzilla.redhat.com/show_bug.cgi?id=1459946
+#            https://bugzilla.redhat.com/show_bug.cgi?id=1511462
+#            https://bugzilla.redhat.com/show_bug.cgi?id=1514033
+Requires: 389-ds-base >= %{ds_version}
 Requires: openldap-clients > 2.4.35-4
 Requires: nss >= 3.14.3-12.0
 Requires: nss-tools >= 3.14.3-12.0
@@ -332,18 +349,16 @@ Requires(postun): python3
 Requires: python3-gssapi >= 1.2.0-5
 Requires: python3-systemd
 Requires: python3-mod_wsgi
-Conflicts: mod_wsgi
 %else
 Requires(preun): python2
 Requires(postun): python2
 Requires: python2-gssapi >= 1.2.0-5
 Requires: python2-systemd
 Requires: mod_wsgi
-Conflicts: python3-mod_wsgi
 %endif
 Requires: mod_auth_gssapi >= 1.5.0
-# 1.0.14-3: https://bugzilla.redhat.com/show_bug.cgi?id=1431206
-Requires: mod_nss >= 1.0.14-3
+# 1.0.14-7: https://pagure.io/mod_nss/issue/45
+Requires: mod_nss >= 1.0.14-7
 Requires: mod_session
 # 0.9.9: https://github.com/adelton/mod_lookup_identity/pull/3
 Requires: mod_lookup_identity >= 0.9.9
@@ -356,15 +371,17 @@ Requires: selinux-policy >= %{selinux_policy_version}
 Requires(post): selinux-policy-base >= %{selinux_policy_version}
 Requires: slapi-nis >= %{slapi_nis_version}
 # 10.5.1-2 contains Python 3 vault fix
-Requires: pki-ca >= 10.5.1-2
-Requires: pki-kra >= 10.5.1-2
+Requires: pki-ca >= %{pki_version}
+Requires: pki-kra >= %{pki_version}
 Requires(preun): systemd-units
 Requires(postun): systemd-units
 Requires: policycoreutils >= 2.1.12-5
 Requires: tar
 Requires(pre): certmonger >= 0.79.5-1
-# 1.3.7.6-1: https://bugzilla.redhat.com/show_bug.cgi?id=1488295
-Requires(pre): 389-ds-base >= 1.3.7.6-1
+# 1.3.7.9-1: https://bugzilla.redhat.com/show_bug.cgi?id=1459946
+#            https://bugzilla.redhat.com/show_bug.cgi?id=1511462
+#            https://bugzilla.redhat.com/show_bug.cgi?id=1514033
+Requires(pre): 389-ds-base >= %{ds_version}
 Requires: fontawesome-fonts
 Requires: open-sans-fonts
 Requires: openssl
@@ -425,7 +442,7 @@ BuildRequires:  dbus-python
 Requires: python2-dns >= 1.15
 Requires: python2-kdcproxy >= 0.3
 Requires: rpm-libs
-Requires: pki-base-python2 >= 10.5.1-2
+Requires: pki-base-python2 >= %{pki_version}
 Requires: python2-augeas
 
 %description -n python2-ipaserver
@@ -450,6 +467,7 @@ Requires: python3-ipaclient = %{version}-%{release}
 Requires: python3-custodia >= 0.3.1
 # we need pre-requires since earlier versions may break upgrade
 Requires(pre): python3-pyldap >= %{python3_ldap_version}
+Conflicts: python3-ldap < 3.1.0
 Requires: python3-lxml
 Requires: python3-gssapi >= 1.2.0
 Requires: python3-sssdconfig
@@ -459,7 +477,7 @@ Requires: python3-dns >= 1.15
 Requires: python3-kdcproxy >= 0.3
 Requires: python3-augeas
 Requires: rpm-libs
-Requires: pki-base-python3 >= 10.5.1-2
+Requires: pki-base-python3 >= %{pki_version}
 
 %description -n python3-ipaserver
 IPA is an integrated solution to provide centrally managed Identity (users,
@@ -505,10 +523,6 @@ Requires: bind-utils >= 9.11.0-6.P2
 Requires: bind-pkcs11 >= 9.11.0-6.P2
 Requires: bind-pkcs11-utils >= 9.11.0-6.P2
 Requires: opendnssec >= 1.4.6-4
-# Keep python2 dependencies until DNSSEC daemons are ported to Python 3
-Requires: python2
-Requires: python2-ipalib
-Requires: python2-ipaserver
 
 Provides: %{alt_name}-server-dns = %{version}
 Conflicts: %{alt_name}-server-dns
@@ -573,10 +587,13 @@ Requires: %{name}-common = %{version}-%{release}
 Requires: python3-gssapi >= 1.2.0-5
 Requires: python3-ipaclient = %{version}-%{release}
 Requires: python3-pyldap >= %{python3_ldap_version}
+Conflicts: python3-ldap < 3.1.0
+Requires: python3-sssdconfig
 %else
 Requires: python2-gssapi >= 1.2.0-5
 Requires: python2-ipaclient = %{version}-%{release}
 Requires: python2-ldap >= %{python2_ldap_version}
+Requires: python2-sssdconfig
 %endif
 Requires: cyrus-sasl-gssapi%{?_isa}
 Requires: ntp
@@ -588,7 +605,6 @@ Requires: initscripts
 Requires: libcurl >= 7.21.7-2
 Requires: xmlrpc-c >= 1.27.4
 Requires: sssd >= 1.14.0
-Requires: python2-sssdconfig
 Requires: certmonger >= 0.79.5-1
 Requires: nss-tools
 Requires: bind-utils
@@ -807,6 +823,7 @@ Requires: python3-jwcrypto >= 0.4.2
 Requires: python3-cffi
 # we need pre-requires since earlier versions may break upgrade
 Requires(pre): python3-pyldap >= %{python3_ldap_version}
+Conflicts: python3-ldap < 3.1.0
 Requires: python3-requests
 Requires: python3-dns >= 1.15
 Requires: python3-netifaces >= 0.10.4
@@ -869,6 +886,11 @@ Requires: ldns-utils
 Requires: python2-sssdconfig
 Requires: python2-cryptography >= 1.6
 Requires: iptables
+%if 0%{?fedora} == 27
+# workaround for https://bugzilla.redhat.com/show_bug.cgi?id=1564527
+# Tests are failing because ntpd restarts segfaults on some CPU archs.
+Requires: glibc >= 2.26-24
+%endif
 
 Provides: %{alt_name}-tests = %{version}
 Conflicts: %{alt_name}-tests
@@ -903,6 +925,11 @@ Requires: ldns-utils
 Requires: python3-sssdconfig
 Requires: python3-cryptography >= 1.6
 Requires: iptables
+%if 0%{?fedora} == 27
+# workaround for https://bugzilla.redhat.com/show_bug.cgi?id=1564527
+# Tests are failing because ntpd restarts segfaults on some CPU archs.
+Requires: glibc >= 2.26-24
+%endif
 
 %description -n python3-ipatests
 IPA is an integrated solution to provide centrally managed Identity (users,
@@ -949,10 +976,14 @@ PY3_SUBST_PATHS='
 client/ipa-certupdate
 client/ipa-client-automount
 client/ipa-client-install
+daemons/dnssec/ipa-dnskeysyncd
+daemons/dnssec/ipa-dnskeysync-replica
+daemons/dnssec/ipa-ods-exporter
 daemons/ipa-otpd/test.py
 install/certmonger/ipa-server-guard
 install/certmonger/dogtag-ipa-ca-renew-agent-submit
 install/oddjob/com.redhat.idm.trust-fetch-domains
+install/oddjob/org.freeipa.server.trust-enable-agent
 install/restart_scripts/renew_ra_cert_pre
 install/restart_scripts/renew_ca_cert
 install/restart_scripts/renew_ra_cert
@@ -965,7 +996,9 @@ install/tools/ipa-adtrust-install
 install/tools/ipa-backup
 install/tools/ipa-ca-install
 install/tools/ipa-cacert-manage
+install/tools/ipa-cert-fix
 install/tools/ipa-compat-manage
+install/tools/ipa-crlgen-manage
 install/tools/ipa-csreplica-manage
 install/tools/ipa-custodia
 install/tools/ipa-custodia-check
@@ -1283,6 +1316,10 @@ if [ $1 -gt 1 ] ; then
 
     if [ $restore -ge 2 ]; then
         %{python} -c 'from ipaclient.install.client import update_ipa_nssdb; update_ipa_nssdb()' >/var/log/ipaupgrade.log 2>&1
+        SSH_CLIENT_SYSTEM_CONF="/etc/ssh/ssh_config"
+        if [ -f "$SSH_CLIENT_SYSTEM_CONF" ]; then
+            sed -E --in-place=.orig 's/^(HostKeyAlgorithms ssh-rsa,ssh-dss)$/# disabled by ipa-client update\n# \1/' "$SSH_CLIENT_SYSTEM_CONF"
+        fi
     fi
 fi
 
@@ -1351,6 +1388,8 @@ fi
 %{_sbindir}/ipa-cacert-manage
 %{_sbindir}/ipa-winsync-migrate
 %{_sbindir}/ipa-pkinit-manage
+%{_sbindir}/ipa-crlgen-manage
+%{_sbindir}/ipa-cert-fix
 %{_libexecdir}/certmonger/dogtag-ipa-ca-renew-agent-submit
 %{_libexecdir}/certmonger/ipa-server-guard
 %dir %{_libexecdir}/ipa
@@ -1364,6 +1403,7 @@ fi
 %{_libexecdir}/ipa/ipa-otpd
 %dir %{_libexecdir}/ipa/oddjob
 %attr(0755,root,root) %{_libexecdir}/ipa/oddjob/org.freeipa.server.conncheck
+%attr(0755,root,root) %{_libexecdir}/ipa/oddjob/org.freeipa.server.trust-enable-agent
 %config(noreplace) %{_sysconfdir}/dbus-1/system.d/org.freeipa.server.conf
 %config(noreplace) %{_sysconfdir}/oddjobd.conf.d/ipa-server.conf
 %dir %{_libexecdir}/ipa/certmonger
@@ -1415,6 +1455,8 @@ fi
 %{_mandir}/man1/ipa-cacert-manage.1*
 %{_mandir}/man1/ipa-winsync-migrate.1*
 %{_mandir}/man1/ipa-pkinit-manage.1*
+%{_mandir}/man1/ipa-crlgen-manage.1*
+%{_mandir}/man1/ipa-cert-fix.1*
 
 
 %files -n python2-ipaserver
@@ -1498,19 +1540,19 @@ fi
 %dir %{_sysconfdir}/ipa/html
 %config(noreplace) %{_sysconfdir}/ipa/html/ssbrowser.html
 %config(noreplace) %{_sysconfdir}/ipa/html/unauthorized.html
-%ghost %attr(0644,root,apache) %config(noreplace) %{_sysconfdir}/httpd/conf.d/ipa-rewrite.conf
-%ghost %attr(0644,root,apache) %config(noreplace) %{_sysconfdir}/httpd/conf.d/ipa.conf
-%ghost %attr(0644,root,apache) %config(noreplace) %{_sysconfdir}/httpd/conf.d/ipa-kdc-proxy.conf
-%ghost %attr(0644,root,apache) %config(noreplace) %{_sysconfdir}/httpd/conf.d/ipa-pki-proxy.conf
-%ghost %attr(0644,root,apache) %config(noreplace) %{_sysconfdir}/ipa/kdcproxy/ipa-kdc-proxy.conf
+%ghost %attr(0644,root,root) %config(noreplace) %{_sysconfdir}/httpd/conf.d/ipa-rewrite.conf
+%ghost %attr(0644,root,root) %config(noreplace) %{_sysconfdir}/httpd/conf.d/ipa.conf
+%ghost %attr(0644,root,root) %config(noreplace) %{_sysconfdir}/httpd/conf.d/ipa-kdc-proxy.conf
+%ghost %attr(0640,root,root) %config(noreplace) %{_sysconfdir}/httpd/conf.d/ipa-pki-proxy.conf
+%ghost %attr(0644,root,root) %config(noreplace) %{_sysconfdir}/ipa/kdcproxy/ipa-kdc-proxy.conf
 %dir %attr(0755,root,root) %{_sysconfdir}/ipa/dnssec
 %{_usr}/share/ipa/ipa.conf
 %{_usr}/share/ipa/ipa-rewrite.conf
 %{_usr}/share/ipa/ipa-pki-proxy.conf
-%ghost %attr(0644,root,apache) %config(noreplace) %{_usr}/share/ipa/html/ca.crt
-%ghost %attr(0644,root,apache) %{_usr}/share/ipa/html/krb.con
-%ghost %attr(0644,root,apache) %{_usr}/share/ipa/html/krb5.ini
-%ghost %attr(0644,root,apache) %{_usr}/share/ipa/html/krbrealm.con
+%ghost %attr(0644,root,root) %config(noreplace) %{_usr}/share/ipa/html/ca.crt
+%ghost %attr(0644,root,root) %{_usr}/share/ipa/html/krb.con
+%ghost %attr(0644,root,root) %{_usr}/share/ipa/html/krb5.ini
+%ghost %attr(0644,root,root) %{_usr}/share/ipa/html/krbrealm.con
 %dir %{_usr}/share/ipa/updates/
 %{_usr}/share/ipa/updates/*
 %dir %{_localstatedir}/lib/ipa
@@ -1519,8 +1561,8 @@ fi
 %attr(711,root,root) %dir %{_localstatedir}/lib/ipa/sysrestore
 %attr(700,root,root) %dir %{_localstatedir}/lib/ipa/sysupgrade
 %attr(755,root,root) %dir %{_localstatedir}/lib/ipa/pki-ca
-%ghost %{_localstatedir}/lib/ipa/pki-ca/publish
-%ghost %{_localstatedir}/named/dyndb-ldap/ipa
+%ghost %attr(775,root,pkiuser) %{_localstatedir}/lib/ipa/pki-ca/publish
+%ghost %attr(770,named,named) %{_localstatedir}/named/dyndb-ldap/ipa
 %dir %attr(0700,root,root) %{_sysconfdir}/ipa/custodia
 %dir %{_usr}/share/ipa/schema.d
 %attr(0644,root,root) %{_usr}/share/ipa/schema.d/README
@@ -1634,19 +1676,19 @@ fi
 %doc README.md Contributors.txt
 %license COPYING
 %dir %attr(0755,root,root) %{_sysconfdir}/ipa/
-%ghost %attr(0644,root,apache) %config(noreplace) %{_sysconfdir}/ipa/default.conf
-%ghost %attr(0644,root,apache) %config(noreplace) %{_sysconfdir}/ipa/ca.crt
+%ghost %attr(0644,root,root) %config(noreplace) %{_sysconfdir}/ipa/default.conf
+%ghost %attr(0644,root,root) %config(noreplace) %{_sysconfdir}/ipa/ca.crt
 %dir %attr(0755,root,root) %{_sysconfdir}/ipa/nssdb
 # old dbm format
-%ghost %config(noreplace) %{_sysconfdir}/ipa/nssdb/cert8.db
-%ghost %config(noreplace) %{_sysconfdir}/ipa/nssdb/key3.db
-%ghost %config(noreplace) %{_sysconfdir}/ipa/nssdb/secmod.db
+%ghost %attr(644,root,root) %config(noreplace) %{_sysconfdir}/ipa/nssdb/cert8.db
+%ghost %attr(644,root,root) %config(noreplace) %{_sysconfdir}/ipa/nssdb/key3.db
+%ghost %attr(644,root,root) %config(noreplace) %{_sysconfdir}/ipa/nssdb/secmod.db
 # new sql format
-%ghost %config(noreplace) %{_sysconfdir}/ipa/nssdb/cert9.db
-%ghost %config(noreplace) %{_sysconfdir}/ipa/nssdb/key4.db
-%ghost %config(noreplace) %{_sysconfdir}/ipa/nssdb/pkcs11.txt
-%ghost %config(noreplace) %{_sysconfdir}/ipa/nssdb/pwdfile.txt
-%ghost %config(noreplace) %{_sysconfdir}/pki/ca-trust/source/ipa.p11-kit
+%ghost %attr(644,root,root) %config(noreplace) %{_sysconfdir}/ipa/nssdb/cert9.db
+%ghost %attr(644,root,root) %config(noreplace) %{_sysconfdir}/ipa/nssdb/key4.db
+%ghost %attr(644,root,root) %config(noreplace) %{_sysconfdir}/ipa/nssdb/pkcs11.txt
+%ghost %attr(600,root,root) %config(noreplace) %{_sysconfdir}/ipa/nssdb/pwdfile.txt
+%ghost %attr(644,root,root) %config(noreplace) %{_sysconfdir}/pki/ca-trust/source/ipa.p11-kit
 %dir %{_localstatedir}/lib/ipa-client
 %dir %{_localstatedir}/lib/ipa-client/pki
 %dir %{_localstatedir}/lib/ipa-client/sysrestore

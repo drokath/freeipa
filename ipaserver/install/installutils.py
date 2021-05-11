@@ -56,7 +56,7 @@ from ipalib.install import sysrestore
 from ipalib.install.kinit import kinit_password
 import ipaplatform
 from ipapython import ipautil, admintool, version
-from ipapython.admintool import ScriptError
+from ipapython.admintool import ScriptError, SERVER_NOT_CONFIGURED  # noqa: E402
 from ipapython.certdb import EXTERNAL_CA_TRUST_FLAGS
 from ipapython.ipaldap import DIRMAN_DN, LDAPClient
 from ipalib.util import validate_hostname
@@ -212,7 +212,7 @@ def verify_fqdn(host_name, no_host_dns=False, local_hostname=True):
         address = a[4][0]
         if address in verified:
             continue
-        if address == '127.0.0.1' or address == '::1':
+        if address in ('127.0.0.1', '::1'):
             raise HostForwardLookupError("The IPA Server hostname must not resolve to localhost (%s). A routable IP address must be used. Check /etc/hosts to see if %s is an alias for %s" % (address, host_name, address))
         try:
             logger.debug('Check reverse address of %s', address)
@@ -599,18 +599,25 @@ def get_directive(filename, directive, separator=' '):
     fd.close()
     return None
 
+
 def kadmin(command):
-    return ipautil.run(["kadmin.local", "-q", command,
-                        "-x", "ipa-setup-override-restrictions"],
-                       capture_output=True,
-                       capture_error=True)
+    return ipautil.run(
+        [
+            paths.KADMIN_LOCAL, "-q", command,
+            "-x", "ipa-setup-override-restrictions"
+        ],
+        capture_output=True,
+        capture_error=True
+    )
 
 
 def kadmin_addprinc(principal):
     return kadmin("addprinc -randkey " + principal)
 
+
 def kadmin_modprinc(principal, options):
     return kadmin("modprinc " + options + " " + principal)
+
 
 def create_keytab(path, principal):
     try:
@@ -832,7 +839,7 @@ def expand_replica_info(filename, password):
     tarfile = top_dir+"/files.tar"
     dir_path = top_dir + "/realm_info"
     decrypt_file(filename, tarfile, password, top_dir)
-    ipautil.run(["tar", "xf", tarfile, "-C", top_dir])
+    ipautil.run([paths.TAR, "xf", tarfile, "-C", top_dir])
     os.remove(tarfile)
 
     return top_dir, dir_path
@@ -934,18 +941,19 @@ def check_server_configuration():
     """
     server_fstore = sysrestore.FileStore(paths.SYSRESTORE)
     if not server_fstore.has_files():
-        raise RuntimeError("IPA is not configured on this system.")
+        raise ScriptError("IPA is not configured on this system.",
+                          rval=SERVER_NOT_CONFIGURED)
 
 
 def remove_file(filename):
-    """
-    Remove a file and log any exceptions raised.
+    """Remove a file and log any exceptions raised.
     """
     try:
-        if os.path.lexists(filename):
-            os.unlink(filename)
+        os.unlink(filename)
     except Exception as e:
-        logger.error('Error removing %s: %s', filename, str(e))
+        # ignore missing file
+        if getattr(e, 'errno', None) != errno.ENOENT:
+            logger.error('Error removing %s: %s', filename, str(e))
 
 
 def rmtree(path):
@@ -1313,7 +1321,11 @@ def load_external_cert(files, ca_subject):
     cert_file.flush()
 
     ca_file = tempfile.NamedTemporaryFile()
-    x509.write_certificate_list(ca_cert_chain[1:], ca_file.name)
+    x509.write_certificate_list(
+        ca_cert_chain[1:],
+        ca_file.name,
+        mode=0o644
+    )
     ca_file.flush()
 
     return cert_file, ca_file
@@ -1637,3 +1649,14 @@ def default_subject_base(realm_name):
 
 def default_ca_subject_dn(subject_base):
     return DN(('CN', 'Certificate Authority'), subject_base)
+
+
+def validate_mask():
+    try:
+        mask = os.umask(0)
+    finally:
+        os.umask(mask)
+    mask_str = None
+    if mask & 0b111101101 > 0:
+        mask_str = "{:04o}".format(mask)
+    return mask_str

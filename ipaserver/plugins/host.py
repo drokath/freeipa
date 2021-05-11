@@ -254,6 +254,18 @@ def validate_ipaddr(ugettext, ipaddr):
     return None
 
 
+class HostPassword(Str):
+    """
+    A data type for host passwords to not log password values
+
+    The Password type cannot be used because it disallows
+    setting a password on the command-line which would break
+    backwards compatibility.
+    """
+    def safe_value(self, value):
+        return u'********'
+
+
 @register()
 class host(LDAPObject):
     """
@@ -470,10 +482,11 @@ class host(LDAPObject):
             label=_('Operating system'),
             doc=_('Host operating system and version (e.g. "Fedora 9")'),
         ),
-        Str('userpassword?',
-            cli_name='password',
-            label=_('User password'),
-            doc=_('Password used in bulk enrollment'),
+        HostPassword('userpassword?',
+                     cli_name='password',
+                     label=_('User password'),
+                     doc=_('Password used in bulk enrollment'),
+                     flags=('no_search',),
         ),
         Flag('random?',
             doc=_('Generate a random password to be used in bulk enrollment'),
@@ -686,7 +699,7 @@ class host_add(LDAPCreate):
                 entry_attrs['objectclass'].remove('krbprincipal')
         if options.get('random'):
             entry_attrs['userpassword'] = ipa_generate_password(
-                entropy_bits=TMP_PWD_ENTROPY_BITS)
+                entropy_bits=TMP_PWD_ENTROPY_BITS, special=None)
             # save the password so it can be displayed in post_callback
             setattr(context, 'randompassword', entry_attrs['userpassword'])
 
@@ -700,7 +713,6 @@ class host_add(LDAPCreate):
 
     def post_callback(self, ldap, dn, entry_attrs, *keys, **options):
         assert isinstance(dn, DN)
-        exc = None
         if dns_container_exists(ldap):
             try:
                 parts = keys[-1].split('.')
@@ -719,18 +731,15 @@ class host_add(LDAPCreate):
 
                 update_sshfp_record(domain, unicode(parts[0]), entry_attrs)
             except Exception as e:
-                exc = e
+                self.add_message(messages.FailedToAddHostDNSRecords(reason=e))
         if options.get('random', False):
             try:
-                entry_attrs['randompassword'] = unicode(getattr(context, 'randompassword'))
+                entry_attrs['randompassword'] = unicode(
+                    getattr(context, 'randompassword'))
             except AttributeError:
                 # On the off-chance some other extension deletes this from the
                 # context, don't crash.
                 pass
-        if exc:
-            raise errors.NonFatalError(
-                reason=_('The host was added but the DNS update failed with: %(exc)s') % dict(exc=exc)
-            )
         set_certificate_attrs(entry_attrs)
         set_kerberos_attrs(entry_attrs, options)
         rename_ipaallowedtoperform_from_ldap(entry_attrs, options)
@@ -903,7 +912,9 @@ class host_mod(LDAPUpdate):
             old_certs = entry_attrs_old.get('usercertificate', [])
             removed_certs = set(old_certs) - set(certs)
             for cert in removed_certs:
-                rm_certs = api.Command.cert_find(certificate=cert)['result']
+                rm_certs = api.Command.cert_find(
+                    certificate=cert,
+                    host=keys)['result']
                 revoke_certs(rm_certs)
 
         if certs:
@@ -1052,7 +1063,8 @@ class host_find(LDAPSearch):
                         (filter, hosts_filter), ldap.MATCH_ALL
                     )
 
-        add_sshpubkey_to_attrs_pre(self.context, attrs_list)
+        if not options.get('pkey_only', False):
+            add_sshpubkey_to_attrs_pre(self.context, attrs_list)
 
         return (filter.replace('locality', 'l'), base_dn, scope)
 
@@ -1339,7 +1351,9 @@ class host_remove_cert(LDAPRemoveAttributeViaOption):
         assert isinstance(dn, DN)
 
         for cert in options.get('usercertificate', []):
-            revoke_certs(api.Command.cert_find(certificate=cert)['result'])
+            revoke_certs(api.Command.cert_find(
+                certificate=cert,
+                host=keys)['result'])
 
         return dn
 

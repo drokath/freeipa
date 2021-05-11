@@ -2,6 +2,8 @@
 # Copyright (C) 2017 FreeIPA Contributors see COPYING for license
 #
 
+from __future__ import absolute_import
+
 import os
 
 from ipalib.plugable import Registry
@@ -52,6 +54,9 @@ class common_smart_card_auth_config(Advice):
             )
 
     def upload_smartcard_ca_certificates_to_systemwide_db(self):
+        # Newer version of sssd use OpenSSL and read the CA certs
+        # from /etc/sssd/pki/sssd_auth_ca_db.pem
+        self.log.command('mkdir -p /etc/sssd/pki')
         with self.log.for_loop(
                 self.single_ca_cert_variable_name,
                 '${}'.format(self.smart_card_ca_certs_variable_name)):
@@ -59,6 +64,11 @@ class common_smart_card_auth_config(Advice):
                 'certutil -d {} -A -i ${} -n "Smart Card CA $(uuidgen)" '
                 '-t CT,C,C'.format(
                     self.systemwide_nssdb, self.single_ca_cert_variable_name
+                )
+            )
+            self.log.command(
+                'cat ${} >>  /etc/sssd/pki/sssd_auth_ca_db.pem'.format(
+                    self.single_ca_cert_variable_name
                 )
             )
 
@@ -182,10 +192,11 @@ class config_server_for_smart_card_auth(common_smart_card_auth_config):
         self.log.command(
             self._interpolate_nssnickname_directive_file_into_command(
                 "http_cert_nick=$(grep '{directive}' {filename} |"
-                " cut -f 2 -d ' ')"))
+                " cut -f 2- -d ' ' | sed \"s/^'\(.*\)'$/\\1/\")"))
 
         self.log.exit_on_failed_command(
-            'certutil -M -n $http_cert_nick -d "{}" -f {} -t "Pu,u,u"'.format(
+            'certutil -M -n "$http_cert_nick" -d "{}" -f {} '
+            '-t "Pu,u,u"'.format(
                 paths.HTTPD_ALIAS_DIR,
                 httpd_nss_database_pwd_file),
             ['Can not set trust flags on HTTP certificate'])
@@ -262,6 +273,7 @@ class config_client_for_smart_card_auth(common_smart_card_auth_config):
         self.upload_smartcard_ca_certificates_to_systemwide_db()
         self.update_ipa_ca_certificate_store()
         self.run_authconfig_to_configure_smart_card_auth()
+        self.configure_pam_cert_auth()
         self.restart_sssd()
 
     def check_and_remove_pam_pkcs11(self):
@@ -314,12 +326,43 @@ class config_client_for_smart_card_auth(common_smart_card_auth_config):
         )
 
     def run_authconfig_to_configure_smart_card_auth(self):
+        # In order to be compatible with all clients, we check first
+        # if the client supports authselect.
+        # Otherwise authconfig will be used.
+        self.log.comment('Use either authselect or authconfig to enable '
+                         'Smart Card authentication')
+        self.log.commands_on_predicate(
+            '[ -f "/usr/bin/authselect" ]',
+            ['AUTHCMD="authselect enable-feature with-smartcard"'],
+            ['AUTHCMD="authconfig --enablesssd --enablesssdauth '
+             '--enablesmartcard --smartcardmodule=sssd --smartcardaction=1 '
+             '--updateall"']
+        )
         self.log.exit_on_failed_command(
-            'authconfig --enablesmartcard --smartcardmodule=sssd --updateall',
+            '$AUTHCMD',
             [
                 'Failed to configure Smart Card authentication in SSSD'
             ]
         )
+
+    def configure_pam_cert_auth(self):
+        self.log.comment('Set pam_cert_auth=True in /etc/sssd/sssd.conf')
+        self.log.comment('This step is required only when authselect is used')
+        # If the advise command is run on RHEL7 or fedora but the client
+        # is rhel8, python3 executable may be in a different location
+        # Find the right python path first
+        self.log.command("python3 --version >/dev/null 2>&1")
+        self.log.commands_on_predicate(
+            '[ "$?" -eq 0 ]',
+            ['PYTHON3CMD=python3'],
+            ['PYTHON3CMD=/usr/libexec/platform-python']
+        )
+        self.log.commands_on_predicate(
+            '[ -f "/usr/bin/authselect" ]',
+            ["${PYTHON3CMD} -c 'from SSSDConfig import SSSDConfig; "
+             "c = SSSDConfig(); c.import_config(); "
+             "c.set(\"pam\", \"pam_cert_auth\", \"True\"); "
+             "c.write()'"])
 
     def restart_sssd(self):
         self.log.command('systemctl restart sssd.service')

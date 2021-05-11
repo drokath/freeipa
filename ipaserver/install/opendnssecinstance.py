@@ -2,6 +2,8 @@
 # Copyright (C) 2014  FreeIPA Contributors see COPYING for license
 #
 
+from __future__ import absolute_import
+
 import logging
 import os
 import pwd
@@ -13,6 +15,7 @@ from subprocess import CalledProcessError
 from ipalib.install import sysrestore
 from ipaserver.install import service
 from ipaserver.install import installutils
+from ipaserver.masters import ENABLED_SERVICE
 from ipapython.dn import DN
 from ipapython import ipautil
 from ipaplatform import services
@@ -43,7 +46,7 @@ def get_dnssec_key_masters(conn):
     filter_attrs = {
         u'cn': u'DNSSEC',
         u'objectclass': u'ipaConfigObject',
-        u'ipaConfigString': [KEYMASTER, u'enabledService'],
+        u'ipaConfigString': [KEYMASTER, ENABLED_SERVICE],
     }
     only_masters_f = conn.make_filter(filter_attrs, rules=conn.MATCH_ALL)
 
@@ -138,8 +141,8 @@ class OpenDNSSECInstance(service.Service):
 
     def __enable(self):
         try:
-            self.ldap_enable('DNSSEC', self.fqdn, None,
-                             self.suffix, self.extra_config)
+            self.ldap_configure('DNSSEC', self.fqdn, None,
+                                self.suffix, self.extra_config)
         except errors.DuplicateEntry:
             logger.error("DNSSEC service already exists")
 
@@ -370,7 +373,7 @@ class OpenDNSSECInstance(service.Service):
 
         self.restore_state("kasp_db_configured")  # just eat state
 
-        # disabled by default, by ldap_enable()
+        # disabled by default, by ldap_configure()
         if enabled:
             self.enable()
 

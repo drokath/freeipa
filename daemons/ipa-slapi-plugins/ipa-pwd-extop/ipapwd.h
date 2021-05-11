@@ -90,6 +90,7 @@ struct ipapwd_operation {
     struct ipapwd_data pwdata;
     int pwd_op;
     int is_krb;
+    int is_memberof;
     int skip_keys;
     int skip_history;
 };
@@ -113,11 +114,12 @@ struct ipapwd_krbcfg {
 
 int ipapwd_entry_checks(Slapi_PBlock *pb, struct slapi_entry *e,
                         int *is_root, int *is_krb, int *is_smb, int *is_ipant,
+			int *is_memberof,
                         char *attr, int access);
 int ipapwd_gen_checks(Slapi_PBlock *pb, char **errMesg,
                       struct ipapwd_krbcfg **config, int check_flags);
 int ipapwd_CheckPolicy(struct ipapwd_data *data);
-int ipapwd_getEntry(const char *dn, Slapi_Entry **e2, char **attrlist);
+int ipapwd_getEntry(Slapi_DN *sdn, Slapi_Entry **e2, char **attrlist);
 int ipapwd_get_cur_kvno(Slapi_Entry *target);
 int ipapwd_setdate(Slapi_Entry *source, Slapi_Mods *smods, const char *attr,
                    time_t date, bool remove);
@@ -131,6 +133,7 @@ int ipapwd_set_extradata(const char *dn,
                          time_t unixtime);
 void ipapwd_free_slapi_value_array(Slapi_Value ***svals);
 void free_ipapwd_krbcfg(struct ipapwd_krbcfg **cfg);
+int ipapwd_check_max_pwd_len(size_t len, char **errMesg);
 
 /* from encoding.c */
 struct ipapwd_keyset {

@@ -17,6 +17,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from __future__ import absolute_import
+
 import logging
 import os
 import tempfile
@@ -32,9 +34,9 @@ from ipapython import ipautil
 from ipaplatform.paths import paths
 from ipapython.dn import DN
 from ipatests.test_integration.base import IntegrationTest
-from ipatests.test_integration import create_caless_pki
-from ipatests.test_integration.create_external_ca import ExternalCA
-from ipatests.pytest_plugins.integration import tasks
+from ipatests.pytest_ipa.integration import tasks
+from ipatests.pytest_ipa.integration.create_external_ca import ExternalCA
+from ipatests.pytest_ipa.integration import create_caless_pki
 from ipalib.constants import DOMAIN_LEVEL_0
 
 if six.PY3:
@@ -104,15 +106,14 @@ def replica_install_teardown(func):
             replica = args[0].replicas[0]
             master = args[0].master
             tasks.kinit_admin(master)
+            tasks.clean_replication_agreement(master, replica, cleanup=True,
+                                              raiseonerr=False)
+            master.run_command(['ipa', 'host-del', replica.hostname],
+                               raiseonerr=False)
             tasks.uninstall_master(replica, clean=False)
             # Now let's uninstall client for the cases when client promotion
             # was not successful
             tasks.uninstall_client(replica)
-            tasks.clean_replication_agreement(master, replica, cleanup=True,
-                                              raiseonerr=False)
-            master.run_command(['ipa', 'host-del',
-                                replica.hostname],
-                               raiseonerr=False)
             ipa_certs_cleanup(replica)
     return wrapped
 
@@ -122,14 +123,16 @@ class CALessBase(IntegrationTest):
     def install(cls, mh):
         cls.cert_dir = tempfile.mkdtemp(prefix="ipatest-")
         cls.pem_filename = os.path.join(cls.cert_dir, 'root.pem')
+        cls.ca2_crt = 'ca2_crt.pem'
+        cls.ca2_kdc_crt = 'ca2_kdc_crt.pem'
         cls.cert_password = cls.master.config.admin_password
         cls.crl_path = os.path.join(cls.master.config.test_dir, 'crl')
 
-        if cls.replicas:
+        if cls.replicas:  # pylint: disable=using-constant-test
             replica_hostname = cls.replicas[0].hostname
         else:
             replica_hostname = 'unused-replica.test'
-        if cls.clients:
+        if cls.clients:  # pylint: disable=using-constant-test
             client_hostname = cls.clients[0].hostname
         else:
             client_hostname = 'unused-client.test'
@@ -159,8 +162,6 @@ class CALessBase(IntegrationTest):
     def uninstall(cls, mh):
         # Remove the NSS database
         shutil.rmtree(cls.cert_dir)
-        for host in cls.get_all_hosts():
-            tasks.uninstall_master(host)
         super(CALessBase, cls).uninstall(mh)
 
     @classmethod
@@ -170,7 +171,7 @@ class CALessBase(IntegrationTest):
                        http_pin=_DEFAULT, dirsrv_pin=_DEFAULT, pkinit_pin=None,
                        root_ca_file='root.pem', pkinit_pkcs12_exists=False,
                        pkinit_pkcs12='server-kdc.p12', unattended=True,
-                       stdin_text=None):
+                       stdin_text=None, extra_args=None):
         """Install a CA-less server
 
         Return value is the remote ipa-server-install command
@@ -178,10 +179,16 @@ class CALessBase(IntegrationTest):
         if host is None:
             host = cls.master
 
-        extra_args = ['--http-cert-file', http_pkcs12,
-                      '--dirsrv-cert-file', dirsrv_pkcs12,
-                      '--ca-cert-file', root_ca_file,
-                      '--ip-address', host.ip]
+        std_args = [
+            '--http-cert-file', http_pkcs12,
+            '--dirsrv-cert-file', dirsrv_pkcs12,
+            '--ca-cert-file', root_ca_file,
+            '--ip-address', host.ip
+        ]
+        if extra_args:
+            extra_args.extend(std_args)
+        else:
+            extra_args = std_args
 
         if http_pin is _DEFAULT:
             http_pin = cls.cert_password
@@ -272,8 +279,9 @@ class CALessBase(IntegrationTest):
                 destination_host.transport.put_file(
                     os.path.join(self.cert_dir, filename),
                     os.path.join(destination_host.config.test_dir, filename))
-            except OSError:
+            except (IOError, OSError):
                 pass
+
         extra_args = []
         if http_pkcs12_exists:
             extra_args.extend(['--http-cert-file', http_pkcs12])
@@ -323,7 +331,7 @@ class CALessBase(IntegrationTest):
 
         # to construct whole chain e.g "ca1 - ca1/sub - ca1/sub/server"
         for index, _value in enumerate(nick_chain):
-            cert_nick = '/'.join(nick_chain[:index+1])
+            cert_nick = '/'.join(nick_chain[:index + 1])
             cert_path = '{}.crt'.format(os.path.join(cls.cert_dir, cert_nick))
             if os.path.isfile(cert_path):
                 fname_chain.append(cert_path)
@@ -334,17 +342,19 @@ class CALessBase(IntegrationTest):
                 with open(cert_fname) as cert:
                     chain.write(cert.read())
 
-        ipautil.run(["openssl", "pkcs12", "-export", "-out", filename,
+        ipautil.run([paths.OPENSSL, "pkcs12", "-export", "-out", filename,
                      "-inkey", key_fname, "-in", certchain_fname, "-passin",
-                     "pass:"+cls.cert_password, "-passout", "pass:"+password,
-                     "-name", nickname], cwd=cls.cert_dir)
+                     "pass:" + cls.cert_password, "-passout", "pass:" +
+                     password, "-name", nickname], cwd=cls.cert_dir)
 
     @classmethod
-    def prepare_cacert(cls, nickname):
+    def prepare_cacert(cls, nickname, filename=None):
         """ Prepare pem file for root_ca_file/ca-cert-file option """
+        if filename is None:
+            filename = cls.pem_filename.split(os.sep)[-1]
         # create_caless_pki saves certificates with ".crt" extension by default
         fname_from_nick = '{}.crt'.format(os.path.join(cls.cert_dir, nickname))
-        shutil.copy(fname_from_nick, cls.pem_filename)
+        shutil.copy(fname_from_nick, os.path.join(cls.cert_dir, filename))
 
     @classmethod
     def get_pem(cls, nickname):
@@ -435,7 +445,10 @@ class TestServerInstall(CALessBase):
 
         self.create_pkcs12('ca1/server')
         self.prepare_cacert('ca1')
-        self.prepare_cacert('ca2')
+        self.prepare_cacert('ca2', filename=self.ca2_crt)
+        with open(self.pem_filename, 'a') as ca1:
+            with open(os.path.join(self.cert_dir, self.ca2_crt), 'r') as ca2:
+                ca1.write(ca2.read())
 
         result = self.install_server()
         assert_error(result, 'root.pem contains more than one certificate')
@@ -1139,6 +1152,41 @@ class TestReplicaInstall(CALessBase):
         if self.domain_level > DOMAIN_LEVEL_0:
             self.verify_installation()
 
+    @replica_install_teardown
+    def test_certs_with_no_password(self):
+        # related to https://pagure.io/freeipa/issue/7274
+
+        self.create_pkcs12('ca1/replica', filename='http.p12',
+                           password='')
+        self.create_pkcs12('ca1/replica', filename='dirsrv.p12',
+                           password='')
+        self.prepare_cacert('ca1')
+
+        self.prepare_replica(http_pkcs12='http.p12',
+                             dirsrv_pkcs12='dirsrv.p12',
+                             http_pin='', dirsrv_pin='')
+        if self.domain_level > DOMAIN_LEVEL_0:
+            self.verify_installation()
+
+    @replica_install_teardown
+    def test_certs_with_no_password_interactive(self):
+        # related to https://pagure.io/freeipa/issue/7274
+
+        self.create_pkcs12('ca1/replica', filename='http.p12',
+                           password='')
+        self.create_pkcs12('ca1/replica', filename='dirsrv.p12',
+                           password='')
+        self.prepare_cacert('ca1')
+        stdin_text = '\n\nyes'
+
+        result = self.prepare_replica(http_pkcs12='http.p12',
+                                      dirsrv_pkcs12='dirsrv.p12',
+                                      http_pin=None, dirsrv_pin=None,
+                                      unattended=False, stdin_text=stdin_text)
+        assert result.returncode == 0
+        if self.domain_level > DOMAIN_LEVEL_0:
+            self.verify_installation()
+
 
 class TestClientInstall(CALessBase):
     num_clients = 1
@@ -1269,7 +1317,7 @@ class TestCertInstall(CALessBase):
                     filename='server.p12', pin=_DEFAULT, stdin_text=None,
                     p12_pin=None, args=None):
         if cert_nick:
-            self.create_pkcs12(cert_nick, password=p12_pin)
+            self.create_pkcs12(cert_nick, password=p12_pin, filename=filename)
         if pin is _DEFAULT:
             pin = self.cert_password
         if cert_exists:
@@ -1495,6 +1543,33 @@ class TestCertInstall(CALessBase):
                                   args=args, stdin_text=stdin_text)
         assert_error(result, "no such option: --dirsrv-pin")
 
+    def test_anon_pkinit_with_external_CA(self):
+
+        test_dir = self.master.config.test_dir
+        self.prepare_cacert('ca2', filename=self.ca2_crt)
+        self.copy_cert(self.master, self.ca2_crt)
+
+        result = self.master.run_command(['ipa-cacert-manage', 'install',
+                                          os.path.join(test_dir, self.ca2_crt)]
+                                         )
+        assert result.returncode == 0
+        result = self.master.run_command(['ipa-certupdate'])
+        assert result.returncode == 0
+        result = self.certinstall('k', 'ca2/server-kdc',
+                                  filename=self.ca2_kdc_crt)
+        assert result.returncode == 0
+        result = self.master.run_command(['systemctl', 'restart', 'krb5kdc'])
+        assert result.returncode == 0
+        result = self.master.run_command(['kinit', '-n'])
+        assert result.returncode == 0
+
+
+def verify_kdc_cert_perms(host):
+    """Verify that the KDC cert pem file has 0644 perms"""
+    cmd = host.run_command(['stat', '-c',
+                           '"%a %G:%U"', paths.KDC_CERT])
+    assert "644 root:root" in cmd.stdout_text
+
 
 class TestPKINIT(CALessBase):
     """Install master and replica with PKINIT"""
@@ -1509,6 +1584,7 @@ class TestPKINIT(CALessBase):
         result = cls.install_server(pkinit_pkcs12_exists=True,
                                     pkinit_pin=_DEFAULT)
         assert result.returncode == 0
+        verify_kdc_cert_perms(cls.master)
 
     @replica_install_teardown
     def test_server_replica_install_pkinit(self):
@@ -1518,6 +1594,7 @@ class TestPKINIT(CALessBase):
                                       pkinit_pin=_DEFAULT)
         assert result.returncode == 0
         self.verify_installation()
+        verify_kdc_cert_perms(self.replicas[0])
 
 
 class TestServerReplicaCALessToCAFull(CALessBase):

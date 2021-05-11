@@ -275,8 +275,6 @@ class Configurable(six.with_metaclass(abc.ABCMeta, object)):
     def group(cls):
         assert not hasattr(super(Configurable, cls), 'group')
 
-        return None
-
     def __init__(self, **kwargs):
         """
         Initialize the configurable.
@@ -312,8 +310,6 @@ class Configurable(six.with_metaclass(abc.ABCMeta, object)):
             prop = prop_cls(self)
             try:
                 prop.validate(value)
-            except KnobValueError:
-                raise
             except ValueError as e:
                 raise KnobValueError(name, str(e))
 
@@ -339,7 +335,7 @@ class Configurable(six.with_metaclass(abc.ABCMeta, object)):
         raise TypeError("{0} is not composite".format(self))
 
     def _get_fallback(self):
-        return None
+        pass
 
     @abc.abstractmethod
     def _configure(self):
@@ -361,7 +357,8 @@ class Configurable(six.with_metaclass(abc.ABCMeta, object)):
 
         self.validate()
         if self.__state == _EXECUTE_PENDING:
-            self.execute()
+            return self.execute()
+        return None
 
     def validate(self):
         """
@@ -384,9 +381,13 @@ class Configurable(six.with_metaclass(abc.ABCMeta, object)):
         """
         Run the execution part of the configurable.
         """
+        return_value = 0
 
-        for _nothing in self._executor():
-            pass
+        for rval in self._executor():
+            if rval is not None and rval > return_value:
+                return_value = rval
+
+        return return_value
 
     def _executor(self):
         """
